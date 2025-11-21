@@ -22,6 +22,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::prelude::*;
+use chrono::Duration;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
@@ -439,7 +440,12 @@ pub struct PeerLiveInfo {
 	pub last_seen: DateTime<Utc>,
 	pub stuck_detector: DateTime<Utc>,
 	pub first_seen: DateTime<Utc>,
+	pub header_request_ts: Option<DateTime<Utc>>,
+	pub header_resp_time_ms: f64,
+	pub header_batch_avg: f64,
 }
+
+const HEADER_METRIC_ALPHA: f64 = 0.5;
 
 /// General information about a connected peer that's useful to other modules.
 #[derive(Clone, Debug)]
@@ -460,6 +466,9 @@ impl PeerLiveInfo {
 			first_seen: Utc::now(),
 			last_seen: Utc::now(),
 			stuck_detector: Utc::now(),
+			header_request_ts: None,
+			header_resp_time_ms: 0.0,
+			header_batch_avg: 0.0,
 		}
 	}
 }
@@ -504,6 +513,65 @@ impl PeerInfo {
 		live_info.total_difficulty = total_difficulty;
 		live_info.last_seen = Utc::now()
 	}
+
+	pub fn mark_header_request(&self) {
+		let mut live_info = self.live_info.write();
+		live_info.header_request_ts = Some(Utc::now());
+	}
+
+	pub fn has_pending_header_request(&self) -> bool {
+		let mut live_info = self.live_info.write();
+		if let Some(ts) = live_info.header_request_ts {
+			if Utc::now() - ts > Duration::seconds(30) {
+				live_info.header_request_ts = None;
+				return false;
+			}
+			return true;
+		}
+		false
+	}
+
+	pub fn record_header_response(&self, batch_len: usize) {
+		let mut live_info = self.live_info.write();
+		let batch = batch_len as f64;
+		if batch > 0.0 {
+			if live_info.header_batch_avg == 0.0 {
+				live_info.header_batch_avg = batch;
+			} else {
+				live_info.header_batch_avg = HEADER_METRIC_ALPHA * batch
+					+ (1.0 - HEADER_METRIC_ALPHA) * live_info.header_batch_avg;
+			}
+		}
+
+		if let Some(start) = live_info.header_request_ts {
+			let elapsed = (Utc::now() - start).num_milliseconds().max(1) as f64;
+			if live_info.header_resp_time_ms == 0.0 {
+				live_info.header_resp_time_ms = elapsed;
+			} else {
+				live_info.header_resp_time_ms = HEADER_METRIC_ALPHA * elapsed
+					+ (1.0 - HEADER_METRIC_ALPHA) * live_info.header_resp_time_ms;
+			}
+			live_info.header_request_ts = None;
+		}
+	}
+
+	pub fn header_batch_avg(&self) -> f64 {
+		self.live_info.read().header_batch_avg
+	}
+
+	pub fn header_resp_time_ms(&self) -> f64 {
+		self.live_info.read().header_resp_time_ms
+	}
+
+	pub fn header_sync_score(&self) -> f64 {
+		let batch = self.header_batch_avg();
+		if batch <= 0.0 {
+			return 0.0;
+		}
+		let latency = self.header_resp_time_ms();
+		let denom = if latency <= 0.0 { 1.0 } else { latency };
+		batch / denom
+	}
 }
 
 /// Flatten out a PeerInfo and nested PeerLiveInfo (taking a read lock on it)
@@ -517,6 +585,7 @@ pub struct PeerInfoDisplay {
 	pub direction: Direction,
 	pub total_difficulty: Difficulty,
 	pub height: u64,
+	pub header_sync_score: f64,
 }
 
 impl From<PeerInfo> for PeerInfoDisplay {
@@ -529,6 +598,7 @@ impl From<PeerInfo> for PeerInfoDisplay {
 			direction: info.direction,
 			total_difficulty: info.total_difficulty(),
 			height: info.height(),
+			header_sync_score: info.header_sync_score(),
 		}
 	}
 }

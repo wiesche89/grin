@@ -199,6 +199,8 @@ pub struct PeerStats {
 	pub received_bytes_per_sec: u64,
 	/// Peer advertised capability flags.
 	pub capabilities: Capabilities,
+	/// Combined header sync score (bigger = better).
+	pub header_sync_score: f64,
 }
 
 impl PartialEq for PeerStats {
@@ -247,6 +249,7 @@ impl PeerStats {
 			sent_bytes_per_sec: peer.tracker().sent_bytes.read().bytes_per_min() / 60,
 			received_bytes_per_sec: peer.tracker().received_bytes.read().bytes_per_min() / 60,
 			capabilities: peer.info.capabilities,
+			header_sync_score: peer.info.header_sync_score(),
 		}
 	}
 }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::util::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,12 +39,57 @@ use chrono::prelude::*;
 use chrono::Duration;
 
 const LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const MAX_PENDING_ADDRS: usize = 1024;
+
+#[derive(Default)]
+struct PendingPeers {
+	queue: VecDeque<PeerAddr>,
+	set: HashSet<PeerAddr>,
+}
+
+impl PendingPeers {
+	fn new() -> PendingPeers {
+		PendingPeers {
+			queue: VecDeque::new(),
+			set: HashSet::new(),
+		}
+	}
+
+	fn add(&mut self, addr: PeerAddr) {
+		if self.set.contains(&addr) {
+			return;
+		}
+
+		if self.queue.len() >= MAX_PENDING_ADDRS {
+			if let Some(evicted) = self.queue.pop_front() {
+				self.set.remove(&evicted);
+			}
+		}
+
+		self.queue.push_back(addr);
+		self.set.insert(addr);
+	}
+
+	fn drain(&mut self, count: usize) -> Vec<PeerAddr> {
+		let mut out = Vec::with_capacity(count.min(self.queue.len()));
+		for _ in 0..count {
+			if let Some(addr) = self.queue.pop_front() {
+				self.set.remove(&addr);
+				out.push(addr);
+			} else {
+				break;
+			}
+		}
+		out
+	}
+}
 
 pub struct Peers {
 	pub adapter: Arc<dyn ChainAdapter>,
 	store: PeerStore,
 	peers: RwLock<HashMap<PeerAddr, Arc<Peer>>>,
 	config: P2PConfig,
+	pending_peers: RwLock<PendingPeers>,
 }
 
 impl Peers {
@@ -54,6 +99,7 @@ impl Peers {
 			store,
 			config,
 			peers: RwLock::new(HashMap::new()),
+			pending_peers: RwLock::new(PendingPeers::new()),
 		}
 	}
 
@@ -297,6 +343,16 @@ impl Peers {
 	/// Whether we've already seen a peer with the provided address
 	pub fn exists_peer(&self, peer_addr: PeerAddr) -> Result<bool, Error> {
 		self.store.exists_peer(peer_addr).map_err(From::from)
+	}
+
+	fn enqueue_peer_candidate(&self, addr: PeerAddr) {
+		let mut pending = self.pending_peers.write();
+		pending.add(addr);
+	}
+
+	pub fn dequeue_peer_candidates(&self, count: usize) -> Vec<PeerAddr> {
+		let mut pending = self.pending_peers.write();
+		pending.drain(count)
 	}
 
 	/// Saves updated information about a peer
@@ -550,6 +606,9 @@ impl ChainAdapter for Peers {
 		headers: &[core::BlockHeader],
 		peer_info: &PeerInfo,
 	) -> Result<bool, chain::Error> {
+		if !headers.is_empty() {
+			peer_info.record_header_response(headers.len());
+		}
 		if !self.adapter.headers_received(headers, peer_info)? {
 			// if the peer sent us a block header that's intrinsically bad
 			// they are either mistaken or malevolent, both of which require a ban
@@ -698,27 +757,20 @@ impl NetAdapter for Peers {
 
 	/// A list of peers has been received from one of our peers.
 	fn peer_addrs_received(&self, peer_addrs: Vec<PeerAddr>) {
-		trace!("Received {} peer addrs, saving.", peer_addrs.len());
-		let mut to_save: Vec<PeerData> = Vec::new();
+		trace!("Received {} peer addrs, queuing.", peer_addrs.len());
 		for pa in peer_addrs {
 			if let Ok(e) = self.exists_peer(pa) {
 				if e {
 					continue;
 				}
 			}
-			let peer = PeerData {
-				addr: pa,
-				capabilities: Capabilities::UNKNOWN,
-				user_agent: "".to_string(),
-				flags: State::Healthy,
-				last_banned: 0,
-				ban_reason: ReasonForBan::None,
-				last_connected: Utc::now().timestamp(),
-			};
-			to_save.push(peer);
-		}
-		if let Err(e) = self.save_peers(to_save) {
-			error!("Could not save received peer addresses: {:?}", e);
+			if self.is_banned(pa) {
+				continue;
+			}
+			if let Ok(true) = self.is_known(pa) {
+				continue;
+			}
+			self.enqueue_peer_candidate(pa);
 		}
 	}
 

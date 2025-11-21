@@ -229,20 +229,25 @@ fn monitor_peers(peers: Arc<p2p::Peers>, config: p2p::P2PConfig, tx: mpsc::Sende
 	// and queue them up for a connection attempt
 	// intentionally make too many attempts (2x) as some (most?) will fail
 	// as many nodes in our db are not publicly accessible
-	let max_peer_attempts = 128;
+	let max_peer_attempts: usize = 128;
 	let new_peers = peers.find_peers(
 		p2p::State::Healthy,
 		p2p::Capabilities::UNKNOWN,
 		max_peer_attempts as usize,
 	);
+	let mut candidate_addrs: Vec<PeerAddr> = new_peers.into_iter().map(|p| p.addr).collect();
+	let pending_needed = max_peer_attempts.saturating_sub(candidate_addrs.len());
+	if pending_needed > 0 {
+		candidate_addrs.extend(peers.dequeue_peer_candidates(pending_needed));
+	}
 
 	// Only queue up connection attempts for candidate peers where we
 	// are confident we do not yet know about this peer.
 	// The call to is_known() may fail due to contention on the peers map.
 	// Do not attempt any connection where is_known() fails for any reason.
-	for p in new_peers {
-		if let Ok(false) = peers.is_known(p.addr) {
-			tx.send(p.addr).unwrap();
+	for addr in candidate_addrs {
+		if let Ok(false) = peers.is_known(addr) {
+			tx.send(addr).unwrap();
 		}
 	}
 }

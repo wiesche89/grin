@@ -22,6 +22,8 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Instant;
 
+use crossbeam_channel::{unbounded, Sender};
+
 use crate::chain::txhashset::BitmapChunk;
 use crate::chain::{
 	self, BlockStatus, ChainAdapter, Options, SyncState, SyncStatus, TxHashsetDownloadStats,
@@ -66,6 +68,12 @@ where
 	peers: OneTime<Weak<p2p::Peers>>,
 	config: ServerConfig,
 	hooks: Vec<Box<dyn NetEvents + Send + Sync>>,
+	header_batch_tx: Sender<HeaderBatchTask>,
+}
+
+struct HeaderBatchTask {
+	headers: Vec<BlockHeader>,
+	sync_head: chain::Tip,
 }
 
 impl<B, P> p2p::ChainAdapter for NetToChainAdapter<B, P>
@@ -309,7 +317,7 @@ where
 		bhs: &[core::BlockHeader],
 		peer_info: &PeerInfo,
 	) -> Result<bool, chain::Error> {
-		info!(
+		debug!(
 			"Received {} block headers from {}",
 			bhs.len(),
 			peer_info.addr
@@ -329,27 +337,32 @@ where
 			}
 		};
 
-		match self
-			.chain()
-			.sync_block_headers(bhs, sync_head, chain::Options::SYNC)
-		{
-			Ok(sync_head) => {
-				// If we have an updated sync_head after processing this batch of headers
-				// then update our sync_state so we can request relevant headers in the next batch.
-				if let Some(sync_head) = sync_head {
-					self.sync_state.update_header_sync(sync_head);
-				}
-				Ok(true)
-			}
-			Err(e) => {
-				debug!("Block headers refused by chain: {:?}", e);
-				if e.is_bad_data() {
-					Ok(false)
-				} else {
-					Err(e)
-				}
-			}
+		let current_height = self
+			.sync_state
+			.header_sync_height()
+			.unwrap_or(sync_head.height);
+		let max_height = bhs.last().map(|h| h.height).unwrap_or(sync_head.height);
+		if max_height <= current_height {
+			debug!(
+				"Received {} headers from {} ending at {}, already beyond {} - ignoring batch",
+				bhs.len(),
+				peer_info.addr,
+				max_height,
+				current_height
+			);
+			return Ok(true);
 		}
+
+		self.sync_state.add_pending_headers(bhs.len() as u64);
+		let task = HeaderBatchTask {
+			headers: bhs.to_vec(),
+			sync_head,
+		};
+		if self.header_batch_tx.send(task).is_err() {
+			error!("header batch worker channel closed");
+			self.sync_state.consume_pending_headers(bhs.len() as u64);
+		}
+		Ok(true)
 	}
 
 	fn locate_headers(&self, locator: &[Hash]) -> Result<Vec<core::BlockHeader>, chain::Error> {
@@ -705,6 +718,66 @@ where
 		config: ServerConfig,
 		hooks: Vec<Box<dyn NetEvents + Send + Sync>>,
 	) -> Self {
+		let (header_batch_tx, header_batch_rx) = unbounded::<HeaderBatchTask>();
+		let chain_weak = Arc::downgrade(&chain);
+		let sync_state_weak = Arc::downgrade(&sync_state);
+		thread::Builder::new()
+			.name("header_batch_worker".into())
+			.spawn(move || {
+				while let Ok(task) = header_batch_rx.recv() {
+					let Some(chain) = chain_weak.upgrade() else {
+						break;
+					};
+					let Some(sync_state) = sync_state_weak.upgrade() else {
+						break;
+					};
+					let current_height = sync_state
+						.header_sync_height()
+						.unwrap_or(task.sync_head.height);
+					let max_task_height = task
+						.headers
+						.last()
+						.map(|h| h.height)
+						.unwrap_or(task.sync_head.height);
+					if max_task_height <= current_height {
+						debug!(
+							"Skipping header batch ending at {} - already beyond current height {}",
+							max_task_height, current_height
+						);
+						sync_state.consume_pending_headers(task.headers.len() as u64);
+						continue;
+					}
+					let res = chain.sync_block_headers(
+						&task.headers,
+						task.sync_head,
+						chain::Options::SYNC,
+					);
+					match res {
+						Ok(sync_head) => {
+							if let Some(sync_head) = sync_head {
+								sync_state.update_header_sync(sync_head);
+							}
+							info!(
+								"Applied {} headers, new sync head height {}, hash {}",
+								task.headers.len(),
+								task.headers
+									.last()
+									.map(|h| h.height)
+									.unwrap_or(task.sync_head.height),
+								task.headers
+									.last()
+									.map(|h| h.hash())
+									.unwrap_or(task.sync_head.hash()),
+							);
+						}
+						Err(e) => {
+							debug!("Block headers refused by chain: {:?}", e);
+						}
+					}
+					sync_state.consume_pending_headers(task.headers.len() as u64);
+				}
+			})
+			.expect("failed to spawn header batch worker");
 		NetToChainAdapter {
 			sync_state,
 			chain: Arc::downgrade(&chain),
@@ -712,6 +785,7 @@ where
 			peers: OneTime::new(),
 			config,
 			hooks,
+			header_batch_tx,
 		}
 	}
 

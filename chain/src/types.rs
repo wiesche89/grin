@@ -23,6 +23,7 @@ use crate::core::pow::Difficulty;
 use crate::core::ser::{self, PMMRIndexHashable, Readable, Reader, Writeable, Writer};
 use crate::error::Error;
 use crate::util::{RwLock, RwLockWriteGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 bitflags! {
 /// Options for block validation
@@ -178,6 +179,7 @@ pub struct SyncState {
 	/// available where it will be needed (both in the adapter
 	/// and the sync loop)
 	requested_pibd_segments: RwLock<Vec<PIBDSegmentContainer>>,
+	pending_headers: AtomicU64,
 }
 
 impl SyncState {
@@ -187,6 +189,7 @@ impl SyncState {
 			current: RwLock::new(SyncStatus::Initial),
 			sync_error: RwLock::new(None),
 			requested_pibd_segments: RwLock::new(vec![]),
+			pending_headers: AtomicU64::new(0),
 		}
 	}
 
@@ -279,6 +282,7 @@ impl SyncState {
 
 	/// Update PIBD segment list
 	pub fn add_pibd_segment(&self, id: &SegmentTypeIdentifier) {
+		debug!("sync_state: tracking PIBD request for {:?}", id);
 		self.requested_pibd_segments
 			.write()
 			.push(PIBDSegmentContainer::new(id.clone()));
@@ -286,6 +290,7 @@ impl SyncState {
 
 	/// Remove segment from list
 	pub fn remove_pibd_segment(&self, id: &SegmentTypeIdentifier) {
+		debug!("sync_state: removing PIBD request tracking for {:?}", id);
 		self.requested_pibd_segments
 			.write()
 			.retain(|i| &i.identifier != id);
@@ -323,6 +328,43 @@ impl SyncState {
 	/// Clear sync error
 	pub fn clear_sync_error(&self) {
 		*self.sync_error.write() = None;
+	}
+
+	pub fn header_sync_height(&self) -> Option<u64> {
+		match *self.current.read() {
+			SyncStatus::HeaderSync { sync_head, .. } => Some(sync_head.height),
+			_ => None,
+		}
+	}
+
+	pub fn add_pending_headers(&self, count: u64) {
+		self.pending_headers.fetch_add(count, Ordering::Relaxed);
+	}
+
+	pub fn consume_pending_headers(&self, count: u64) {
+		let mut prev = self.pending_headers.load(Ordering::Relaxed);
+		loop {
+			if count >= prev {
+				if self
+					.pending_headers
+					.compare_exchange(prev, 0, Ordering::Relaxed, Ordering::Relaxed)
+					.is_ok()
+				{
+					break;
+				}
+			} else if self
+				.pending_headers
+				.compare_exchange(prev, prev - count, Ordering::Relaxed, Ordering::Relaxed)
+				.is_ok()
+			{
+				break;
+			}
+			prev = self.pending_headers.load(Ordering::Relaxed);
+		}
+	}
+
+	pub fn pending_headers(&self) -> u64 {
+		self.pending_headers.load(Ordering::Relaxed)
 	}
 }
 

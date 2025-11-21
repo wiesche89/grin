@@ -384,6 +384,12 @@ impl Desegmenter {
 				.find(|s| s.1.identifier().idx == bmp_idx)
 			{
 				self.apply_bitmap_segment(idx)?;
+			} else {
+				debug!(
+					"desegmenter: waiting for bitmap segment idx {} (cache size {})",
+					bmp_idx,
+					self.bitmap_segment_cache.len()
+				);
 			}
 		} else {
 			// Check if we need to finalize bitmap
@@ -394,48 +400,75 @@ impl Desegmenter {
 
 			// Check if we can apply the next output segment(s)
 			if let Some(next_output_idx) = self.next_required_output_segment_index() {
-				if let Some((idx, _seg)) = self
+				match self
 					.output_segment_cache
 					.iter()
 					.enumerate()
 					.find(|s| s.1.identifier().idx == next_output_idx)
 				{
-					self.apply_output_segment(idx)?;
+					Some((idx, _)) => {
+						self.apply_output_segment(idx)?;
+					}
+					None => debug!(
+						"desegmenter: waiting for output segment idx {} (cache size {})",
+						next_output_idx,
+						self.output_segment_cache.len()
+					),
 				}
-			} else {
-				if self.output_segment_cache.len() >= self.max_cached_segments {
-					self.output_segment_cache = vec![];
-				}
+			} else if self.output_segment_cache.len() >= self.max_cached_segments {
+				debug!(
+					"desegmenter: dropping {} cached output segments waiting for next requirement",
+					self.output_segment_cache.len()
+				);
+				self.output_segment_cache = vec![];
 			}
 			// Check if we can apply the next rangeproof segment
 			if let Some(next_rp_idx) = self.next_required_rangeproof_segment_index() {
-				if let Some((idx, _seg)) = self
+				match self
 					.rangeproof_segment_cache
 					.iter()
 					.enumerate()
 					.find(|s| s.1.identifier().idx == next_rp_idx)
 				{
-					self.apply_rangeproof_segment(idx)?;
+					Some((idx, _)) => {
+						self.apply_rangeproof_segment(idx)?;
+					}
+					None => debug!(
+						"desegmenter: waiting for rangeproof segment idx {} (cache size {})",
+						next_rp_idx,
+						self.rangeproof_segment_cache.len()
+					),
 				}
-			} else {
-				if self.rangeproof_segment_cache.len() >= self.max_cached_segments {
-					self.rangeproof_segment_cache = vec![];
-				}
+			} else if self.rangeproof_segment_cache.len() >= self.max_cached_segments {
+				debug!(
+					"desegmenter: dropping {} cached rangeproof segments waiting for next requirement",
+					self.rangeproof_segment_cache.len()
+				);
+				self.rangeproof_segment_cache = vec![];
 			}
 			// Check if we can apply the next kernel segment
 			if let Some(next_kernel_idx) = self.next_required_kernel_segment_index() {
-				if let Some((idx, _seg)) = self
+				match self
 					.kernel_segment_cache
 					.iter()
 					.enumerate()
 					.find(|s| s.1.identifier().idx == next_kernel_idx)
 				{
-					self.apply_kernel_segment(idx)?;
+					Some((idx, _)) => {
+						self.apply_kernel_segment(idx)?;
+					}
+					None => debug!(
+						"desegmenter: waiting for kernel segment idx {} (cache size {})",
+						next_kernel_idx,
+						self.kernel_segment_cache.len()
+					),
 				}
-			} else {
-				if self.kernel_segment_cache.len() >= self.max_cached_segments {
-					self.kernel_segment_cache = vec![];
-				}
+			} else if self.kernel_segment_cache.len() >= self.max_cached_segments {
+				debug!(
+					"desegmenter: dropping {} cached kernel segments waiting for next requirement",
+					self.kernel_segment_cache.len()
+				);
+				self.kernel_segment_cache = vec![];
 			}
 		}
 		Ok(())

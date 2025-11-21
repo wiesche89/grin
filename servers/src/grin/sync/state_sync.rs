@@ -280,12 +280,24 @@ impl StateSync {
 			// (12 is divisible by 3, to try and evenly spread the requests among the 3
 			// main pmmrs. Bitmaps segments will always be requested first)
 			next_segment_ids = d.next_desired_segments(pibd_params::SEGMENT_REQUEST_COUNT);
+			if !next_segment_ids.is_empty() {
+				debug!(
+					"state_sync: requesting next PIBD segments {:?}",
+					next_segment_ids
+				);
+			} else {
+				trace!("state_sync: no PIBD segments requested this loop");
+			}
 		}
 
 		// For each segment, pick a desirable peer and send message
 		// (Provided we're not waiting for a response for this message from someone else)
 		for seg_id in next_segment_ids.iter() {
 			if self.sync_state.contains_pibd_segment(seg_id) {
+				debug!(
+					"state_sync: segment {:?} already requested, waiting for response",
+					seg_id
+				);
 				trace!("Request list contains, continuing: {:?}", seg_id);
 				continue;
 			}
@@ -364,6 +376,11 @@ impl StateSync {
 						p.info.addr, e
 					);
 					self.sync_state.remove_pibd_segment(seg_id);
+				} else {
+					debug!(
+						"state_sync: requested segment {:?} from peer {}",
+						seg_id, p.info.addr
+					);
 				}
 			}
 		}
