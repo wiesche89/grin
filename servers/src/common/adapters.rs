@@ -724,6 +724,7 @@ where
 		thread::Builder::new()
 			.name("header_batch_worker".into())
 			.spawn(move || {
+				let mut applied_batches = 0usize;
 				while let Ok(task) = header_batch_rx.recv() {
 					let Some(chain) = chain_weak.upgrade() else {
 						break;
@@ -757,7 +758,8 @@ where
 							if let Some(sync_head) = sync_head {
 								sync_state.update_header_sync(sync_head);
 							}
-							info!(
+							applied_batches += 1;
+							let msg = format!(
 								"Applied {} headers, new sync head height {}, hash {}",
 								task.headers.len(),
 								task.headers
@@ -769,6 +771,11 @@ where
 									.map(|h| h.hash())
 									.unwrap_or(task.sync_head.hash()),
 							);
+							if applied_batches % 50 == 0 {
+								info!("{}", msg);
+							} else {
+								debug!("{}", msg);
+							}
 						}
 						Err(e) => {
 							debug!("Block headers refused by chain: {:?}", e);

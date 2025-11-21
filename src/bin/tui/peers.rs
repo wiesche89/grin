@@ -42,7 +42,6 @@ pub enum PeerColumn {
 	Version,
 	UserAgent,
 	Capabilities,
-	HeaderSync,
 }
 
 impl PeerColumn {
@@ -56,7 +55,6 @@ impl PeerColumn {
 			PeerColumn::Direction => "Direction",
 			PeerColumn::UserAgent => "User Agent",
 			PeerColumn::Capabilities => "Capabilities",
-			PeerColumn::HeaderSync => "Header Score",
 		}
 	}
 }
@@ -87,13 +85,6 @@ impl TableViewItem<PeerColumn> for PeerStats {
 			PeerColumn::Version => format!("{}", self.version),
 			PeerColumn::UserAgent => self.user_agent.clone(),
 			PeerColumn::Capabilities => format!("{}", self.capabilities.bits()),
-			PeerColumn::HeaderSync => {
-				if self.header_sync_score <= 0.0 {
-					"-".to_string()
-				} else {
-					format!("{:.2}", self.header_sync_score)
-				}
-			}
 		}
 	}
 
@@ -131,11 +122,6 @@ impl TableViewItem<PeerColumn> for PeerStats {
 				.capabilities
 				.cmp(&other.capabilities)
 				.then(sort_by_addr()),
-			PeerColumn::HeaderSync => self
-				.header_sync_score
-				.partial_cmp(&other.header_sync_score)
-				.unwrap_or(Ordering::Equal)
-				.then(sort_by_addr()),
 		}
 	}
 }
@@ -156,9 +142,6 @@ impl TUIPeerView {
 			})
 			.column(PeerColumn::Version, "Proto", |c| c.width_percent(4))
 			.column(PeerColumn::Capabilities, "Capab", |c| c.width_percent(4))
-			.column(PeerColumn::HeaderSync, "Header Score", |c| {
-				c.width_percent(8)
-			})
 			.column(PeerColumn::UserAgent, "User Agent", |c| c.width_percent(20));
 		let peer_status_view = ResizedView::with_full_screen(
 			LinearLayout::new(Orientation::Vertical)

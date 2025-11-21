@@ -606,9 +606,6 @@ impl ChainAdapter for Peers {
 		headers: &[core::BlockHeader],
 		peer_info: &PeerInfo,
 	) -> Result<bool, chain::Error> {
-		if !headers.is_empty() {
-			peer_info.record_header_response(headers.len());
-		}
 		if !self.adapter.headers_received(headers, peer_info)? {
 			// if the peer sent us a block header that's intrinsically bad
 			// they are either mistaken or malevolent, both of which require a ban

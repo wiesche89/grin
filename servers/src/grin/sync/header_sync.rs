@@ -14,7 +14,6 @@
 
 use chrono::prelude::{DateTime, Utc};
 use chrono::Duration;
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::chain::{self, SyncState, SyncStatus};
@@ -32,7 +31,7 @@ pub struct HeaderSync {
 	stalling_ts: Option<DateTime<Utc>>,
 }
 
-const MAX_PARALLEL_HEADER_REQUESTS: usize = 1;
+const DESIRED_HEADER_BATCH: u64 = 128;
 
 impl HeaderSync {
 	pub fn new(
@@ -66,20 +65,13 @@ impl HeaderSync {
 			return Ok(false);
 		}
 
-		let sync_peers = self.choose_sync_peers();
+		let sync_peer = self.choose_sync_peer();
 
-		if let Some(primary_peer) = sync_peers.first() {
-			let (peer_height, peer_diff) =
-				sync_peers
-					.iter()
-					.fold((0, Difficulty::zero()), |(height, diff), peer| {
-						let peer_diff = peer.info.total_difficulty();
-						if peer_diff > diff {
-							(peer.info.height(), peer_diff)
-						} else {
-							(height, diff)
-						}
-					});
+		if let Some(sync_peer) = sync_peer {
+			let (peer_height, peer_diff) = {
+				let info = sync_peer.info.live_info.read();
+				(info.height, info.total_difficulty)
+			};
 
 			// Quick check - nothing to sync if we are caught up with the peer.
 			if peer_diff <= sync_head.total_difficulty {
@@ -96,8 +88,8 @@ impl HeaderSync {
 				highest_diff: peer_diff,
 			});
 
-			self.header_sync(sync_head, &sync_peers);
-			self.syncing_peer = Some(primary_peer.clone());
+			self.header_sync(sync_head, sync_peer.clone());
+			self.syncing_peer = Some(sync_peer.clone());
 		}
 		Ok(true)
 	}
@@ -116,7 +108,7 @@ impl HeaderSync {
 		}
 		let virtual_height = header_head.height + pending;
 
-		let max_batch = (p2p::MAX_BLOCK_HEADERS as u64).saturating_sub(4);
+		let max_batch = DESIRED_HEADER_BATCH.saturating_sub(4);
 		let newly_received = virtual_height.saturating_sub(prev_height);
 		// received a full batch (or nearly full), can ask for more
 		let all_headers_received = newly_received >= max_batch;
@@ -132,7 +124,7 @@ impl HeaderSync {
 		};
 
 		if force_sync || all_headers_received || stalling || partial_batch {
-			self.prev_header_sync = (now + Duration::seconds(10), virtual_height, virtual_height);
+			self.prev_header_sync = (now + Duration::seconds(2), virtual_height, virtual_height);
 
 			// save the stalling start time
 			if stalling {
@@ -183,7 +175,7 @@ impl HeaderSync {
 		}
 	}
 
-	fn choose_sync_peers(&self) -> Vec<Arc<Peer>> {
+	fn choose_sync_peer(&self) -> Option<Arc<Peer>> {
 		let peers_iter = || {
 			self.peers
 				.iter()
@@ -193,59 +185,17 @@ impl HeaderSync {
 
 		// Filter peers further based on max difficulty.
 		let max_diff = peers_iter().max_difficulty().unwrap_or(Difficulty::zero());
-		let candidates: Vec<_> = peers_iter()
-			.with_difficulty(|x| x >= max_diff)
-			.into_iter()
-			.collect();
+		let peers_iter = || peers_iter().with_difficulty(|x| x >= max_diff);
 
-		if candidates.is_empty() {
-			return vec![];
-		}
-
-		let mut outbound: Vec<_> = candidates
-			.iter()
-			.filter(|p| p.info.is_outbound())
-			.cloned()
-			.collect();
-		let mut inbound: Vec<_> = candidates
-			.into_iter()
-			.filter(|p| p.info.is_inbound())
-			.collect();
-
-		let sort_by_speed = |peers: &mut Vec<Arc<Peer>>| {
-			peers.sort_by(|a, b| {
-				let score_a = a.info.header_sync_score();
-				let score_b = b.info.header_sync_score();
-				score_b.partial_cmp(&score_a).unwrap_or(Ordering::Equal)
-			});
-		};
-
-		sort_by_speed(&mut outbound);
-		sort_by_speed(&mut inbound);
-
-		let mut result = Vec::new();
-		for peer in outbound.into_iter().chain(inbound.into_iter()) {
-			if peer.info.has_pending_header_request() {
-				continue;
-			}
-			result.push(peer);
-			if result.len() >= MAX_PARALLEL_HEADER_REQUESTS {
-				break;
-			}
-		}
-
-		if result.is_empty() {
-			warn!("no suitable peer available for header sync");
-		}
-
-		result
+		peers_iter()
+			.outbound()
+			.choose_random()
+			.or_else(|| peers_iter().inbound().choose_random())
 	}
 
-	fn header_sync(&self, sync_head: chain::Tip, peers: &[Arc<Peer>]) {
-		for peer in peers {
-			if peer.info.total_difficulty() > sync_head.total_difficulty {
-				self.request_headers(sync_head, peer.clone());
-			}
+	fn header_sync(&self, sync_head: chain::Tip, peer: Arc<Peer>) {
+		if peer.info.total_difficulty() > sync_head.total_difficulty {
+			self.request_headers(sync_head, peer);
 		}
 	}
 
@@ -257,9 +207,7 @@ impl HeaderSync {
 				peer.info.addr, locator,
 			);
 
-			if peer.send_header_request(locator).is_ok() {
-				peer.info.mark_header_request();
-			}
+			let _ = peer.send_header_request(locator);
 		}
 	}
 
