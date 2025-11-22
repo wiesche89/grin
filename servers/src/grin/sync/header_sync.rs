@@ -68,6 +68,7 @@ impl HeaderSync {
 		let sync_peer = self.choose_sync_peer();
 
 		if let Some(sync_peer) = sync_peer {
+			let previous_peer = self.syncing_peer.as_ref().map(|p| p.info.addr);
 			let (peer_height, peer_diff) = {
 				let info = sync_peer.info.live_info.read();
 				(info.height, info.total_difficulty)
@@ -90,6 +91,12 @@ impl HeaderSync {
 
 			self.header_sync(sync_head, sync_peer.clone());
 			self.syncing_peer = Some(sync_peer.clone());
+			if previous_peer != Some(sync_peer.info.addr) {
+				info!(
+					"header_sync: switching to peer {} (previous {:?})",
+					sync_peer.info.addr, previous_peer
+				);
+			}
 		}
 		Ok(true)
 	}
