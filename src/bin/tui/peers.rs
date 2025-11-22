@@ -142,7 +142,7 @@ impl TUIPeerView {
 			})
 			.column(PeerColumn::Version, "Proto", |c| c.width_percent(4))
 			.column(PeerColumn::Capabilities, "Capab", |c| c.width_percent(4))
-			.column(PeerColumn::UserAgent, "User Agent", |c| c.width_percent(20));
+			.column(PeerColumn::UserAgent, "User Agent", |c| c.width_percent(18));
 		let peer_status_view = ResizedView::with_full_screen(
 			LinearLayout::new(Orientation::Vertical)
 				.child(
