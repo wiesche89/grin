@@ -252,7 +252,8 @@ impl StateSync {
 
 		// Remove stale requests, if we haven't recieved the segment within a minute re-request
 		// TODO: verify timing
-		self.sync_state
+		let stale_segments = self
+			.sync_state
 			.remove_stale_pibd_requests(pibd_params::SEGMENT_REQUEST_TIMEOUT_SECS);
 
 		// Apply segments... TODO: figure out how this should be called, might
@@ -301,6 +302,10 @@ impl StateSync {
 				trace!("Request list contains, continuing: {:?}", seg_id);
 				continue;
 			}
+			let excluded_peer = stale_segments
+				.iter()
+				.find(|(stale_id, _)| stale_id == seg_id)
+				.and_then(|(_, addr)| *addr);
 
 			// TODO: urg
 			let peers = self.peers.clone();
@@ -343,15 +348,34 @@ impl StateSync {
 			}
 
 			// Choose a random "most work" peer, preferring outbound if at all possible.
-			let peer = peers_iter_pibd()
-				.outbound()
-				.choose_random()
-				.or_else(|| peers_iter_pibd().inbound().choose_random());
+			let mut peer = None;
+			for _ in 0..5 {
+				let candidate = peers_iter_pibd()
+					.outbound()
+					.choose_random()
+					.or_else(|| peers_iter_pibd().inbound().choose_random());
+				if let (Some(ex), Some(ref cand)) = (excluded_peer, candidate.as_ref()) {
+					if cand.info.addr.0 == ex {
+						continue;
+					}
+				}
+				if candidate.is_none() {
+					continue;
+				}
+				peer = candidate;
+				break;
+			}
+			if peer.is_none() {
+				peer = peers_iter_pibd()
+					.outbound()
+					.choose_random()
+					.or_else(|| peers_iter_pibd().inbound().choose_random());
+			}
 			trace!("Chosen peer is {:?}", peer);
 
 			if let Some(p) = peer {
 				// add to list of segments that are being tracked
-				self.sync_state.add_pibd_segment(seg_id);
+				self.sync_state.add_pibd_segment(seg_id, p.info.addr.0);
 				let res = match seg_id.segment_type {
 					SegmentType::Bitmap => p.send_bitmap_segment_request(
 						archive_header.hash(),

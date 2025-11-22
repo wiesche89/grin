@@ -23,6 +23,7 @@ use crate::core::pow::Difficulty;
 use crate::core::ser::{self, PMMRIndexHashable, Readable, Reader, Writeable, Writer};
 use crate::error::Error;
 use crate::util::{RwLock, RwLockWriteGuard};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 bitflags! {
@@ -156,14 +157,17 @@ pub struct PIBDSegmentContainer {
 	pub identifier: SegmentTypeIdentifier,
 	/// Time at which this request was made
 	pub request_time: DateTime<Utc>,
+	/// Peer that most recently received this request
+	pub last_peer: Option<SocketAddr>,
 }
 
 impl PIBDSegmentContainer {
 	/// Return container with timestamp
-	pub fn new(identifier: SegmentTypeIdentifier) -> Self {
+	pub fn new(identifier: SegmentTypeIdentifier, peer_addr: Option<SocketAddr>) -> Self {
 		Self {
 			identifier,
 			request_time: Utc::now(),
+			last_peer: peer_addr,
 		}
 	}
 }
@@ -281,11 +285,11 @@ impl SyncState {
 	}
 
 	/// Update PIBD segment list
-	pub fn add_pibd_segment(&self, id: &SegmentTypeIdentifier) {
+	pub fn add_pibd_segment(&self, id: &SegmentTypeIdentifier, peer_addr: SocketAddr) {
 		debug!("sync_state: tracking PIBD request for {:?}", id);
 		self.requested_pibd_segments
 			.write()
-			.push(PIBDSegmentContainer::new(id.clone()));
+			.push(PIBDSegmentContainer::new(id.clone(), Some(peer_addr)));
 	}
 
 	/// Remove segment from list
@@ -297,14 +301,22 @@ impl SyncState {
 	}
 
 	/// Remove segments with request timestamps less than cutoff time
-	pub fn remove_stale_pibd_requests(&self, timeout_seconds: i64) {
+	pub fn remove_stale_pibd_requests(
+		&self,
+		timeout_seconds: i64,
+	) -> Vec<(SegmentTypeIdentifier, Option<SocketAddr>)> {
 		let cutoff_time = Utc::now() - Duration::seconds(timeout_seconds);
+		let mut removed_segments = vec![];
 		self.requested_pibd_segments.write().retain(|i| {
 			if i.request_time <= cutoff_time {
-				debug!("Removing + retrying PIBD request after timeout: {:?}", i)
-			};
-			i.request_time > cutoff_time
+				info!("Removing + retrying PIBD request after timeout: {:?}", i);
+				removed_segments.push((i.identifier.clone(), i.last_peer));
+				false
+			} else {
+				true
+			}
 		});
+		removed_segments
 	}
 
 	/// Check whether segment is in request list
