@@ -31,7 +31,7 @@ pub struct HeaderSync {
 	stalling_ts: Option<DateTime<Utc>>,
 }
 
-const DESIRED_HEADER_BATCH: u64 = 512;
+const DESIRED_HEADER_BATCH: u64 = 128;
 
 impl HeaderSync {
 	pub fn new(
@@ -131,7 +131,7 @@ impl HeaderSync {
 		};
 
 		if force_sync || all_headers_received || stalling || partial_batch {
-			self.prev_header_sync = (now + Duration::seconds(1), virtual_height, virtual_height);
+			self.prev_header_sync = (now + Duration::seconds(2), virtual_height, virtual_height);
 
 			// save the stalling start time
 			if stalling {
