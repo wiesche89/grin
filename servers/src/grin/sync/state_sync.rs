@@ -14,12 +14,15 @@
 
 use chrono::prelude::{DateTime, Utc};
 use chrono::Duration;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::chain::{self, pibd_params, SyncState, SyncStatus};
 use crate::core::core::{hash::Hashed, pmmr::segment::SegmentType};
 use crate::core::global;
 use crate::core::pow::Difficulty;
+use crate::p2p::types::PeerAddr;
 use crate::p2p::{self, Capabilities, Peer};
 use crate::util::StopState;
 
@@ -39,6 +42,7 @@ pub struct StateSync {
 
 	pibd_aborted: bool,
 	earliest_zero_pibd_peer_time: Option<DateTime<Utc>>,
+	blocked_peers: HashMap<SocketAddr, DateTime<Utc>>,
 }
 
 impl StateSync {
@@ -55,6 +59,7 @@ impl StateSync {
 			state_sync_peer: None,
 			pibd_aborted: false,
 			earliest_zero_pibd_peer_time: None,
+			blocked_peers: HashMap::new(),
 		}
 	}
 
@@ -250,11 +255,39 @@ impl StateSync {
 		let archive_header = self.chain.txhashset_archive_header_header_only().unwrap();
 		let desegmenter = self.chain.desegmenter(&archive_header).unwrap();
 
+		self.cleanup_blocked_peers();
+
 		// Remove stale requests, if we haven't recieved the segment within a minute re-request
 		// TODO: verify timing
 		let stale_segments = self
 			.sync_state
 			.remove_stale_pibd_requests(pibd_params::SEGMENT_REQUEST_TIMEOUT_SECS);
+
+		if !stale_segments.is_empty() {
+			for (seg_id, peer_addr) in stale_segments.iter() {
+				if let Some(peer_addr) = peer_addr {
+					self.block_peer_temporarily(*peer_addr);
+					warn!(
+						"state_sync: peer {} moved to PIBD retry exclusion list for segment {:?}",
+						peer_addr, seg_id
+					);
+					if let Err(e) = self
+						.peers
+						.disconnect_peer(PeerAddr(*peer_addr), "PIBD segment timeout")
+					{
+						debug!(
+							"state_sync: failed to disconnect timed-out peer {}: {:?}",
+							peer_addr, e
+						);
+					}
+				} else {
+					warn!(
+						"state_sync: PIBD request {:?} timed out without a recorded peer",
+						seg_id
+					);
+				}
+			}
+		}
 
 		// Apply segments... TODO: figure out how this should be called, might
 		// need to be a separate thread.
@@ -313,7 +346,15 @@ impl StateSync {
 			// First, get max difficulty or greater peers
 			let peers_iter = || peers.iter().connected();
 			let max_diff = peers_iter().max_difficulty().unwrap_or(Difficulty::zero());
+			let max_pibd_height = peers_iter()
+				.with_capabilities(Capabilities::PIBD_HIST_1)
+				.connected()
+				.into_iter()
+				.map(|p| p.info.height())
+				.max()
+				.unwrap_or(0);
 			let peers_iter_max = || peers_iter().with_difficulty(|x| x >= max_diff);
+			let height_slack = pibd_params::PIBD_PEER_HEIGHT_SLACK_BLOCKS;
 
 			// Then, further filter by PIBD capabilities v1
 			let peers_iter_pibd = || {
@@ -322,11 +363,17 @@ impl StateSync {
 					.connected()
 			};
 
+			let available_pibd_peers = peers_iter_pibd()
+				.into_iter()
+				.filter(|p| !self.is_peer_blocked(&p.info.addr.0))
+				.filter(|p| p.info.height().saturating_add(height_slack) >= max_pibd_height)
+				.count();
+
 			// If there are no suitable PIBD-Enabled peers, AND there hasn't been one for a minute,
 			// abort PIBD and fall back to txhashset download
 			// Waiting a minute helps ensures that the cancellation isn't simply due to a single non-PIBD enabled
 			// peer having the max difficulty
-			if peers_iter_pibd().count() == 0 {
+			if available_pibd_peers == 0 {
 				if let None = self.earliest_zero_pibd_peer_time {
 					self.set_earliest_zero_pibd_peer_time(Some(Utc::now()));
 				}
@@ -343,6 +390,14 @@ impl StateSync {
 					self.set_pibd_aborted();
 					return false;
 				}
+				let cleared = self.sync_state.clear_pibd_requests();
+				if cleared > 0 {
+					warn!(
+						"state_sync: cleared {} pending PIBD requests because no PIBD-enabled peers are currently available",
+						cleared
+					);
+				}
+				continue;
 			} else {
 				self.set_earliest_zero_pibd_peer_time(None)
 			}
@@ -354,6 +409,25 @@ impl StateSync {
 					.outbound()
 					.choose_random()
 					.or_else(|| peers_iter_pibd().inbound().choose_random());
+				if let Some(ref cand) = candidate {
+					if self.is_peer_blocked(&cand.info.addr.0) {
+						trace!(
+							"state_sync: skipping temporarily blocked peer {}",
+							cand.info.addr
+						);
+						continue;
+					}
+					if cand.info.height().saturating_add(height_slack) < max_pibd_height {
+						warn!(
+							"state_sync: skipping peer {} because it's more than {} blocks behind (height {}, max {})",
+							cand.info.addr,
+							height_slack,
+							cand.info.height(),
+							max_pibd_height
+						);
+						continue;
+					}
+				}
 				if let (Some(ex), Some(ref cand)) = (excluded_peer, candidate.as_ref()) {
 					if cand.info.addr.0 == ex {
 						continue;
@@ -366,58 +440,84 @@ impl StateSync {
 				break;
 			}
 			if peer.is_none() {
-				peer = peers_iter_pibd()
+				let fallback = peers_iter_pibd()
 					.outbound()
 					.choose_random()
 					.or_else(|| peers_iter_pibd().inbound().choose_random());
+				if let Some(ref cand) = fallback {
+					if self.is_peer_blocked(&cand.info.addr.0) {
+						trace!(
+							"state_sync: fallback peer {} is temporarily blocked",
+							cand.info.addr
+						);
+					} else if cand.info.height().saturating_add(height_slack) < max_pibd_height {
+						warn!(
+							"state_sync: fallback peer {} is more than {} blocks behind (height {}, max {})",
+							cand.info.addr,
+							height_slack,
+							cand.info.height(),
+							max_pibd_height
+						);
+					} else {
+						peer = fallback;
+					}
+				}
 			}
 			trace!("Chosen peer is {:?}", peer);
 
-			if let Some(p) = peer {
+			let p = match peer {
+				Some(p) => p,
+				None => {
+					debug!(
+						"state_sync: no eligible PIBD peers available for request {:?}",
+						seg_id
+					);
+					continue;
+				}
+			};
+
+			{
 				// add to list of segments that are being tracked
 				self.sync_state.add_pibd_segment(seg_id, p.info.addr.0);
-				let res = match seg_id.segment_type {
-					SegmentType::Bitmap => p.send_bitmap_segment_request(
-						archive_header.hash(),
-						seg_id.identifier.clone(),
-					),
-					SegmentType::Output => p.send_output_segment_request(
-						archive_header.hash(),
-						seg_id.identifier.clone(),
-					),
-					SegmentType::RangeProof => p.send_rangeproof_segment_request(
-						archive_header.hash(),
-						seg_id.identifier.clone(),
-					),
-					SegmentType::Kernel => p.send_kernel_segment_request(
-						archive_header.hash(),
-						seg_id.identifier.clone(),
-					),
-				};
-				if let Err(e) = res {
+			}
+			let res = match seg_id.segment_type {
+				SegmentType::Bitmap => {
+					p.send_bitmap_segment_request(archive_header.hash(), seg_id.identifier.clone())
+				}
+				SegmentType::Output => {
+					p.send_output_segment_request(archive_header.hash(), seg_id.identifier.clone())
+				}
+				SegmentType::RangeProof => p.send_rangeproof_segment_request(
+					archive_header.hash(),
+					seg_id.identifier.clone(),
+				),
+				SegmentType::Kernel => {
+					p.send_kernel_segment_request(archive_header.hash(), seg_id.identifier.clone())
+				}
+			};
+			if let Err(e) = res {
+				info!(
+					"Error sending request to peer at {}, reason: {:?}",
+					p.info.addr, e
+				);
+				self.sync_state.remove_pibd_segment(seg_id);
+			} else if let Some(prev_peer) = excluded_peer {
+				if p.info.addr.0 != prev_peer {
 					info!(
-						"Error sending request to peer at {}, reason: {:?}",
-						p.info.addr, e
+						"state_sync: retrying segment {:?} with new peer {} (previously {})",
+						seg_id, p.info.addr, prev_peer
 					);
-					self.sync_state.remove_pibd_segment(seg_id);
-				} else if let Some(prev_peer) = excluded_peer {
-					if p.info.addr.0 != prev_peer {
-						info!(
-							"state_sync: retrying segment {:?} with new peer {} (previously {})",
-							seg_id, p.info.addr, prev_peer
-						);
-					} else {
-						debug!(
-							"state_sync: requested segment {:?} from peer {}",
-							seg_id, p.info.addr
-						);
-					}
 				} else {
 					debug!(
 						"state_sync: requested segment {:?} from peer {}",
 						seg_id, p.info.addr
 					);
 				}
+			} else {
+				debug!(
+					"state_sync: requested segment {:?} from peer {}",
+					seg_id, p.info.addr
+				);
 			}
 		}
 		false
@@ -510,5 +610,35 @@ impl StateSync {
 	fn state_sync_reset(&mut self) {
 		self.prev_state_sync = None;
 		self.state_sync_peer = None;
+	}
+
+	/// Temporarily prevent a peer from receiving further PIBD requests.
+	fn block_peer_temporarily(&mut self, addr: SocketAddr) {
+		let expiry = Utc::now() + Duration::seconds(pibd_params::SEGMENT_REQUEST_TIMEOUT_SECS);
+		self.blocked_peers.insert(addr, expiry);
+	}
+
+	/// Remove expired temporary blocks.
+	fn cleanup_blocked_peers(&mut self) {
+		let now = Utc::now();
+		self.blocked_peers.retain(|addr, expiry| {
+			if *expiry <= now {
+				trace!(
+					"state_sync: removing temporary block for peer {} after timeout",
+					addr
+				);
+				false
+			} else {
+				true
+			}
+		});
+	}
+
+	/// Whether a peer is currently blocked from PIBD requests.
+	fn is_peer_blocked(&self, addr: &SocketAddr) -> bool {
+		match self.blocked_peers.get(addr) {
+			Some(expiry) => *expiry > Utc::now(),
+			None => false,
+		}
 	}
 }

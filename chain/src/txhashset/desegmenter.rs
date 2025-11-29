@@ -477,16 +477,25 @@ impl Desegmenter {
 	/// the current real state of the underlying elements
 	pub fn next_desired_segments(&mut self, max_elements: usize) -> Vec<SegmentTypeIdentifier> {
 		let mut return_vec = vec![];
-		// First check for required bitmap elements
+
+		if max_elements == 0 {
+			return return_vec;
+		}
+
+		// Für Output / RangeProof / Kernel: mindestens 1 Slot pro Typ zulassen
+		let per_type_limit = std::cmp::max(1, max_elements / 3);
+
+		// --------------------------------------------------------------------
+		// 1. BITMAP-PHASE
+		// --------------------------------------------------------------------
 		if self.bitmap_cache.is_none() {
-			// Get current size of bitmap MMR
+			// Solange Bitmap noch nicht fertig ist: nur Bitmap-Segmente holen
 			let local_pmmr_size = self.bitmap_accumulator.readonly_pmmr().unpruned_size();
-			// Get iterator over expected bitmap elements
 			let mut identifier_iter = SegmentIdentifier::traversal_iter(
 				self.bitmap_mmr_size,
 				self.default_bitmap_segment_height,
 			);
-			// Advance iterator to next expected segment
+
 			while let Some(id) = identifier_iter.next() {
 				if id.segment_pos_range(self.bitmap_mmr_size).1 > local_pmmr_size {
 					if !self.has_bitmap_segment_with_id(id) {
@@ -497,105 +506,141 @@ impl Desegmenter {
 					}
 				}
 			}
-		} else {
-			// We have all required bitmap segments and have recreated our local
-			// bitmap, now continue with other segments, evenly spreading requests
-			// among MMRs
-			let local_output_mmr_size;
-			let local_kernel_mmr_size;
-			let local_rangeproof_mmr_size;
-			{
-				let txhashset = self.txhashset.read();
-				local_output_mmr_size = txhashset.output_mmr_size();
-				local_kernel_mmr_size = txhashset.kernel_mmr_size();
-				local_rangeproof_mmr_size = txhashset.rangeproof_mmr_size();
-			}
-			let total_output_segments = SegmentIdentifier::count_segments_required(
-				self.archive_header.output_mmr_size,
-				self.default_output_segment_height,
-			);
-			let mut elems_added = 0;
-			if let Some(mut next_output_idx) = self.next_required_output_segment_index() {
-				while (next_output_idx as usize) < total_output_segments {
-					if self.output_segment_cache.len() >= self.max_cached_segments {
-						break;
-					}
-					if elems_added == max_elements / 3 {
-						break;
-					}
-					let output_id = SegmentIdentifier {
-						height: self.default_output_segment_height,
-						idx: next_output_idx,
-					};
-					let (_first, last) =
-						output_id.segment_pos_range(self.archive_header.output_mmr_size);
-					if last > local_output_mmr_size && !self.has_output_segment_with_id(output_id) {
-						return_vec.push(SegmentTypeIdentifier::new(SegmentType::Output, output_id));
-						elems_added += 1;
-					}
-					next_output_idx += 1;
-				}
-			}
 
-			let total_rangeproof_segments = SegmentIdentifier::count_segments_required(
-				self.archive_header.output_mmr_size,
-				self.default_rangeproof_segment_height,
-			);
-			elems_added = 0;
-			if let Some(mut next_rp_idx) = self.next_required_rangeproof_segment_index() {
-				while (next_rp_idx as usize) < total_rangeproof_segments {
-					if self.rangeproof_segment_cache.len() >= self.max_cached_segments {
-						break;
-					}
-					if elems_added == max_elements / 3 {
-						break;
-					}
-					let rp_id = SegmentIdentifier {
-						height: self.default_rangeproof_segment_height,
-						idx: next_rp_idx,
-					};
-					let (_first, last) =
-						rp_id.segment_pos_range(self.archive_header.output_mmr_size);
-					if last > local_rangeproof_mmr_size
-						&& !self.has_rangeproof_segment_with_id(rp_id)
-					{
-						return_vec.push(SegmentTypeIdentifier::new(SegmentType::RangeProof, rp_id));
-						elems_added += 1;
-					}
-					next_rp_idx += 1;
-				}
-			}
+			// Wenn wir hier sind und nichts mehr wollen, Bitmap aber noch nicht fertig ist,
+			// wird beim nächsten Durchlauf weiter Bitmap gezogen.
+			return return_vec;
+		}
 
-			let total_kernel_segments = SegmentIdentifier::count_segments_required(
-				self.archive_header.kernel_mmr_size,
-				self.default_kernel_segment_height,
-			);
-			elems_added = 0;
-			if let Some(mut next_kernel_idx) = self.next_required_kernel_segment_index() {
-				while (next_kernel_idx as usize) < total_kernel_segments {
-					if self.kernel_segment_cache.len() >= self.max_cached_segments {
-						break;
-					}
-					if elems_added == max_elements / 3 {
-						break;
-					}
-					let k_id = SegmentIdentifier {
-						height: self.default_kernel_segment_height,
-						idx: next_kernel_idx,
-					};
-					let (_first, last) =
-						k_id.segment_pos_range(self.archive_header.kernel_mmr_size);
-					if last > local_kernel_mmr_size && !self.has_kernel_segment_with_id(k_id) {
-						return_vec.push(SegmentTypeIdentifier::new(SegmentType::Kernel, k_id));
-						elems_added += 1;
-					}
-					next_kernel_idx += 1;
+		// --------------------------------------------------------------------
+		// 2. NACH BITMAP: Outputs / RangeProofs / Kernels
+		// --------------------------------------------------------------------
+		let local_output_mmr_size;
+		let local_kernel_mmr_size;
+		let local_rangeproof_mmr_size;
+		{
+			let txhashset = self.txhashset.read();
+			local_output_mmr_size = txhashset.output_mmr_size();
+			local_kernel_mmr_size = txhashset.kernel_mmr_size();
+			local_rangeproof_mmr_size = txhashset.rangeproof_mmr_size();
+		}
+
+		// -------------------- OUTPUTS --------------------
+		let total_output_segments = SegmentIdentifier::count_segments_required(
+			self.archive_header.output_mmr_size,
+			self.default_output_segment_height,
+		);
+		let mut elems_added = 0;
+		if let Some(mut next_output_idx) = self.next_required_output_segment_index() {
+			while (next_output_idx as usize) < total_output_segments {
+				if self.output_segment_cache.len() >= self.max_cached_segments {
+					break;
 				}
+				if elems_added >= per_type_limit || return_vec.len() >= max_elements {
+					break;
+				}
+				let output_id = SegmentIdentifier {
+					height: self.default_output_segment_height,
+					idx: next_output_idx,
+				};
+				let (_first, last) =
+					output_id.segment_pos_range(self.archive_header.output_mmr_size);
+				if last > local_output_mmr_size && !self.has_output_segment_with_id(output_id) {
+					return_vec.push(SegmentTypeIdentifier::new(SegmentType::Output, output_id));
+					elems_added += 1;
+				}
+				next_output_idx += 1;
 			}
 		}
-		// Always ensure we explicitly ask for the very next kernel segment we are waiting on.
-		// The regular round-robin above can get saturated with outputs and rangeproofs while
-		// the desegmenter is blocked on a missing kernel, so we force this one in.
+
+		// -------------------- RANGEPROOFS --------------------
+		let total_rangeproof_segments = SegmentIdentifier::count_segments_required(
+			self.archive_header.output_mmr_size,
+			self.default_rangeproof_segment_height,
+		);
+		elems_added = 0;
+		if let Some(mut next_rp_idx) = self.next_required_rangeproof_segment_index() {
+			while (next_rp_idx as usize) < total_rangeproof_segments {
+				if self.rangeproof_segment_cache.len() >= self.max_cached_segments {
+					break;
+				}
+				if elems_added >= per_type_limit || return_vec.len() >= max_elements {
+					break;
+				}
+				let rp_id = SegmentIdentifier {
+					height: self.default_rangeproof_segment_height,
+					idx: next_rp_idx,
+				};
+				let (_first, last) = rp_id.segment_pos_range(self.archive_header.output_mmr_size);
+				if last > local_rangeproof_mmr_size && !self.has_rangeproof_segment_with_id(rp_id) {
+					return_vec.push(SegmentTypeIdentifier::new(SegmentType::RangeProof, rp_id));
+					elems_added += 1;
+				}
+				next_rp_idx += 1;
+			}
+		}
+
+		// -------------------- KERNELS (Round-Robin-Teil) --------------------
+		let total_kernel_segments = SegmentIdentifier::count_segments_required(
+			self.archive_header.kernel_mmr_size,
+			self.default_kernel_segment_height,
+		);
+		elems_added = 0;
+		if let Some(mut next_kernel_idx) = self.next_required_kernel_segment_index() {
+			while (next_kernel_idx as usize) < total_kernel_segments {
+				if self.kernel_segment_cache.len() >= self.max_cached_segments {
+					break;
+				}
+				if elems_added >= per_type_limit || return_vec.len() >= max_elements {
+					break;
+				}
+				let k_id = SegmentIdentifier {
+					height: self.default_kernel_segment_height,
+					idx: next_kernel_idx,
+				};
+				let (_first, last) = k_id.segment_pos_range(self.archive_header.kernel_mmr_size);
+				if last > local_kernel_mmr_size && !self.has_kernel_segment_with_id(k_id) {
+					return_vec.push(SegmentTypeIdentifier::new(SegmentType::Kernel, k_id));
+					elems_added += 1;
+				}
+				next_kernel_idx += 1;
+			}
+		}
+
+		// --------------------------------------------------------------------
+		// 3. SAFETY-NET: Je 1 Output / RangeProof / Kernel erzwingen
+		//    (damit nichts verhungert, selbst wenn oben etwas schiefgeht)
+		// --------------------------------------------------------------------
+
+		// Force: Output
+		if let Some(next_output_idx) = self.next_required_output_segment_index() {
+			let seg_id = SegmentIdentifier {
+				height: self.default_output_segment_height,
+				idx: next_output_idx,
+			};
+			if !self.has_output_segment_with_id(seg_id) {
+				if return_vec.len() >= max_elements {
+					return_vec.pop();
+				}
+				return_vec.push(SegmentTypeIdentifier::new(SegmentType::Output, seg_id));
+			}
+		}
+
+		// Force: RangeProof
+		if let Some(next_rp_idx) = self.next_required_rangeproof_segment_index() {
+			let seg_id = SegmentIdentifier {
+				height: self.default_rangeproof_segment_height,
+				idx: next_rp_idx,
+			};
+			if !self.has_rangeproof_segment_with_id(seg_id) {
+				if return_vec.len() >= max_elements {
+					return_vec.pop();
+				}
+				return_vec.push(SegmentTypeIdentifier::new(SegmentType::RangeProof, seg_id));
+			}
+		}
+
+		// Force: Kernel (wie vorher, aber hinter Output/RangeProof)
 		if let Some(next_kernel_idx) = self.next_required_kernel_segment_index() {
 			let seg_id = SegmentIdentifier {
 				height: self.default_kernel_segment_height,
@@ -608,9 +653,11 @@ impl Desegmenter {
 				return_vec.push(SegmentTypeIdentifier::new(SegmentType::Kernel, seg_id));
 			}
 		}
+
 		if return_vec.is_empty() && self.bitmap_cache.is_some() {
 			self.all_segments_complete = true;
 		}
+
 		return_vec
 	}
 

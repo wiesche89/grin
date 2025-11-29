@@ -481,6 +481,22 @@ impl Peers {
 		}
 	}
 
+	/// Disconnect a peer without banning it.
+	pub fn disconnect_peer(&self, peer_addr: PeerAddr, reason: &str) -> Result<(), Error> {
+		let mut peers = self.peers.try_write_for(LOCK_TIMEOUT).ok_or_else(|| {
+			error!("disconnect_peer: failed to get peers lock");
+			Error::PeerException
+		})?;
+		match peers.remove(&peer_addr) {
+			Some(peer) => {
+				warn!("disconnecting peer {} ({})", peer_addr, reason);
+				peer.stop();
+				Ok(())
+			}
+			None => Err(Error::PeerNotFound),
+		}
+	}
+
 	/// We have enough outbound connected peers
 	pub fn enough_outbound_peers(&self) -> bool {
 		self.iter().outbound().connected().count()
