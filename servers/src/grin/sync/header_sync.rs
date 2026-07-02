@@ -41,7 +41,6 @@ pub struct HeaderSync {
 	prev_header_sync: (DateTime<Utc>, u64, u64),
 	syncing_peer: Option<Arc<Peer>>,
 	stalling_ts: Option<DateTime<Utc>>,
-	pending_pihd: Vec<PIHDHeaderSegmentContainer>,
 	pending_legacy: Option<LegacyHeaderRequest>,
 	pihd_failure_count: usize,
 	pihd_peer_timeout_until: Vec<(PeerAddr, DateTime<Utc>)>,
@@ -63,7 +62,6 @@ impl HeaderSync {
 			prev_header_sync: (Utc::now(), 0, 0),
 			syncing_peer: None,
 			stalling_ts: None,
-			pending_pihd: vec![],
 			pending_legacy: None,
 			pihd_failure_count: 0,
 			pihd_peer_timeout_until: vec![],
@@ -109,7 +107,6 @@ impl HeaderSync {
 					);
 				self.pihd_active = false;
 			}
-			self.pending_pihd.clear();
 			self.sync_state.retain_pihd_header_segments(|_| false);
 
 			let sync_peer = self
@@ -196,13 +193,7 @@ impl HeaderSync {
 
 		let mut newly_failed = 0;
 		let mut failed_peers = vec![];
-		self.pending_pihd.retain(|req| {
-			let still_requested = self
-				.sync_state
-				.contains_pihd_header_segment_from(req.identifier, req.peer_addr);
-			if !still_requested {
-				return false;
-			}
+		self.sync_state.retain_pihd_header_segments(|req| {
 			let (complete, connected, timeout) = retain_pihd_segment_conditions(req);
 			if !complete && connected && timeout {
 				newly_failed += 1;
@@ -212,10 +203,6 @@ impl HeaderSync {
 				newly_failed += 1;
 				failed_peers.push(PeerAddr(req.peer_addr));
 			}
-			!complete && connected && !timeout
-		});
-		self.sync_state.retain_pihd_header_segments(|req| {
-			let (complete, connected, timeout) = retain_pihd_segment_conditions(req);
 			!complete && connected && !timeout
 		});
 		if newly_failed > 0 {
@@ -249,7 +236,6 @@ impl HeaderSync {
 					);
 					self.pihd_active = false;
 				}
-				self.pending_pihd.clear();
 				self.sync_state.retain_pihd_header_segments(|_| false);
 				self.pihd_failure_count = 0;
 				self.pihd_stalling_ts = None;
@@ -301,7 +287,7 @@ impl HeaderSync {
 		// received all necessary headers, can ask for more
 		let all_headers_received =
 			header_head.height >= prev_height + (p2p::MAX_BLOCK_HEADERS as u64) - 4;
-		// no headers processed and we're past timeout, need to ask for more
+		// no headers processed, and we're past timeout, need to ask for more
 		let stalling = header_head.height <= latest_height && now > timeout;
 
 		// always enable header sync on initial state transition from NoSync / Initial
@@ -432,12 +418,12 @@ impl HeaderSync {
 		} else {
 			preferred_peers
 		};
-		if self.pending_pihd.len() >= pihd_params::MAX_IN_FLIGHT_SEGMENTS {
+		if self.sync_state.pending_pihd_segments_count() >= pihd_params::MAX_IN_FLIGHT_SEGMENTS {
 			return;
 		}
 		let mut sent = 0;
 		let mut segment_idx = sync_head.height / p2p::pihd_header_segment_capacity();
-		while self.pending_pihd.len() < pihd_params::MAX_IN_FLIGHT_SEGMENTS
+		while self.sync_state.pending_pihd_segments_count() < pihd_params::MAX_IN_FLIGHT_SEGMENTS
 			&& sent < pihd_params::MAX_REQUESTS_PER_TICK
 		{
 			let identifier = SegmentIdentifier {
@@ -448,21 +434,16 @@ impl HeaderSync {
 				Some(height) => height,
 				None => return,
 			};
-			if self
-				.pending_pihd
-				.iter()
-				.any(|req| req.identifier == identifier)
-			{
+			if self.sync_state.contains_pihd_header_segment(identifier) {
 				segment_idx += 1;
 				continue;
 			}
 			let can_request = |peer: &&Arc<Peer>, max_in_flight| {
 				peer.info.height() >= start_height
 					&& self
-						.pending_pihd
-						.iter()
-						.filter(|req| req.peer_addr == peer.info.addr.0)
-						.count() < max_in_flight
+						.sync_state
+						.pending_pihd_segments_count_from(peer.info.addr.0)
+						< max_in_flight
 			};
 			let peer = match peers
 				.iter()
@@ -482,11 +463,6 @@ impl HeaderSync {
 					peer.info.addr.0,
 					target_height,
 				);
-				self.pending_pihd.push(PIHDHeaderSegmentContainer::new(
-					identifier,
-					peer.info.addr.0,
-					target_height,
-				));
 				sent += 1;
 			}
 			segment_idx += 1;

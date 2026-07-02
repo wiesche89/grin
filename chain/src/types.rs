@@ -682,9 +682,14 @@ impl SyncState {
 			.retain(|i| i.reject_time > cutoff_time);
 	}
 
-	/// Number of currently pending PIBD segment requests
+	/// Amount of currently pending PIBD segment requests
 	pub fn pending_pibd_segment_count(&self) -> usize {
 		self.requested_pibd_segments.read().len()
+	}
+
+	/// Amount of pending PIHD segment requests
+	pub fn pending_pihd_segments_count(&self) -> usize {
+		self.requested_pihd_header_segments.read().len()
 	}
 
 	/// Track a pending PIHD header segment request.
@@ -715,6 +720,23 @@ impl SyncState {
 		self.requested_pihd_header_segments
 			.write()
 			.retain(|i| i.identifier != id || i.peer_addr != peer_addr);
+	}
+
+	/// Check whether a PIHD header segment was requested.
+	pub fn contains_pihd_header_segment(&self, id: SegmentIdentifier) -> bool {
+		self.requested_pihd_header_segments
+			.read()
+			.iter()
+			.any(|i| i.identifier == id)
+	}
+
+	/// Amount of requested PIHD header segments from the given peer.
+	pub fn pending_pihd_segments_count_from(&self, peer_addr: SocketAddr) -> usize {
+		self.requested_pihd_header_segments
+			.read()
+			.iter()
+			.filter(|req| req.peer_addr == peer_addr)
+			.count()
 	}
 
 	/// Check whether a PIHD header segment was requested from the given peer.
