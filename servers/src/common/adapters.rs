@@ -1066,16 +1066,12 @@ where
 		let max_idx = next_idx.saturating_add(PIHD_HEADER_CACHE_LOOKAHEAD_SEGMENTS);
 		let clear_cache = {
 			let mut anchor = self.pihd_header_cache_anchor.write();
-			let clear_cache = if let Some(prev) = anchor.as_ref() {
-				if sync_head.height < prev.height
-					|| (sync_head.height == prev.height && sync_head.last_block_h != prev.hash)
-				{
-					true
-				} else {
-					false
+			let clear_cache = match anchor.as_ref() {
+				None => false,
+				Some(prev) => {
+					sync_head.height < prev.height
+						|| (sync_head.height == prev.height && sync_head.last_block_h != prev.hash)
 				}
-			} else {
-				false
 			};
 			*anchor = Some(PihdHeaderCacheAnchor {
 				height: sync_head.height,
