@@ -19,6 +19,7 @@ use chrono::Duration;
 use grin_core::core::{OutputIdentifier, Segment, SegmentType, TxKernel};
 use grin_util::secp::pedersen::RangeProof;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Weak;
 
 use crate::core::core::hash::{Hash, Hashed, ZERO_HASH};
@@ -308,6 +309,7 @@ pub struct SyncState {
 	rejected_pibd_segments: RwLock<Vec<RejectedPIBDSegment>>,
 	rejected_pibd_peers: RwLock<Vec<RejectedPIBDPeer>>,
 	requested_pihd_header_segments: RwLock<Vec<PIHDHeaderSegmentContainer>>,
+	pihd_header_cache_generation: AtomicU64,
 }
 
 impl SyncState {
@@ -320,6 +322,7 @@ impl SyncState {
 			rejected_pibd_segments: RwLock::new(vec![]),
 			rejected_pibd_peers: RwLock::new(vec![]),
 			requested_pihd_header_segments: RwLock::new(vec![]),
+			pihd_header_cache_generation: AtomicU64::new(0),
 		}
 	}
 
@@ -774,6 +777,19 @@ impl SyncState {
 			.retain(|i| keep(i));
 	}
 
+	/// Clear PIHD header requests and invalidate cached received segments
+	pub fn clear_pihd_header_segments(&self) {
+		self.requested_pihd_header_segments.write().clear();
+		// Relaxed is enough here; this only nudges receive caches to drop stale entries.
+		self.pihd_header_cache_generation
+			.fetch_add(1, Ordering::Relaxed);
+	}
+
+	/// Current PIHD cache reset generation
+	pub fn pihd_header_cache_generation(&self) -> u64 {
+		self.pihd_header_cache_generation.load(Ordering::Relaxed)
+	}
+
 	/// Communicate sync error
 	pub fn set_sync_error(&self, error: Error) {
 		*self.sync_error.write() = Some(error);
@@ -1209,6 +1225,20 @@ mod tests {
 
 		assert!(!sync_state.contains_pihd_header_segment_from(first, peer_addr));
 		assert!(sync_state.contains_pihd_header_segment_from(second, peer_addr));
+	}
+
+	#[test]
+	fn clear_pihd_header_segments() {
+		let sync_state = SyncState::new();
+		let id = SegmentIdentifier { height: 9, idx: 1 };
+		let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000);
+		let generation = sync_state.pihd_header_cache_generation();
+
+		sync_state.add_pihd_header_segment(id, peer_addr, 1_024);
+		sync_state.clear_pihd_header_segments();
+
+		assert!(!sync_state.contains_pihd_header_segment_from(id, peer_addr));
+		assert!(sync_state.pihd_header_cache_generation() > generation);
 	}
 
 	#[test]

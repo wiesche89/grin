@@ -107,7 +107,7 @@ impl HeaderSync {
 					);
 				self.pihd_active = false;
 			}
-			self.sync_state.retain_pihd_header_segments(|_| false);
+			self.sync_state.clear_pihd_header_segments();
 
 			let sync_peer = self
 				.syncing_peer
@@ -187,7 +187,7 @@ impl HeaderSync {
 				let complete = header_head.height >= completed_height;
 				let timeout = now
 					> req.request_time
-						+ Duration::seconds(pihd_params::HEADER_REQUEST_TIMEOUT_SECS);
+						+ Duration::seconds(pihd_params::PIHD_HEADER_REQUEST_TIMEOUT_SECS);
 				(complete, connected, timeout)
 			};
 
@@ -236,7 +236,7 @@ impl HeaderSync {
 					);
 					self.pihd_active = false;
 				}
-				self.sync_state.retain_pihd_header_segments(|_| false);
+				self.sync_state.clear_pihd_header_segments();
 				self.pihd_failure_count = 0;
 				self.pihd_stalling_ts = None;
 				self.pihd_disabled_until = Some(now + Duration::seconds(pihd_params::DISABLE_SECS));
@@ -247,7 +247,8 @@ impl HeaderSync {
 			let connected = self.peers.get_connected_peer(req.peer_addr).is_some();
 			let complete = header_head.height > req.height;
 			let timed_out = now
-				> req.requested_at + Duration::seconds(pihd_params::HEADER_REQUEST_TIMEOUT_SECS);
+				> req.requested_at
+					+ Duration::seconds(pihd_params::LEGACY_HEADER_REQUEST_TIMEOUT_SECS);
 			if complete || timed_out || !connected {
 				self.pending_legacy = None;
 			}

@@ -27,7 +27,8 @@ use std::time::Instant;
 
 use crate::chain::txhashset::BitmapChunk;
 use crate::chain::{
-	self, BlockStatus, ChainAdapter, Options, SyncState, SyncStatus, TxHashsetDownloadStats,
+	self, BlockStatus, ChainAdapter, HeaderSyncMode, Options, SyncState, SyncStatus,
+	TxHashsetDownloadStats,
 };
 use crate::common::hooks::{ChainEvents, NetEvents};
 use crate::common::types::{
@@ -75,6 +76,7 @@ struct PihdHeaderSegmentCacheEntry {
 struct PihdHeaderCacheAnchor {
 	height: u64,
 	hash: Hash,
+	generation: u64,
 }
 
 /// Implementation of the NetAdapter for the . Gets notified when new
@@ -685,6 +687,7 @@ where
 				"ignoring unsolicited PIHD header segment {:?} from {}",
 				id, peer_info.addr
 			);
+			self.clear_stale_pihd_header_cache();
 			return Ok(HeaderSegmentAcceptance::Accepted);
 		}
 		let expected_first_height = match id
@@ -702,12 +705,11 @@ where
 			.pihd_header_segment_target_height(id, peer_info.addr.0)
 			.unwrap_or(0);
 		if headers.is_empty() {
+			// Keep the request pending so repeated empty responses hit the normal timeout path.
 			debug!(
-				"ignoring empty PIHD header segment {:?} from {} (expected first height {}, target height {})",
+				"ignoring empty PIHD header segment {:?} from {} (expected first height {}, target height {}), request remains pending",
 				id, peer_info.addr, expected_first_height, target_height
 			);
-			self.sync_state
-				.remove_pihd_header_segment(id, peer_info.addr.0);
 			return Ok(HeaderSegmentAcceptance::Accepted);
 		}
 		if headers[0].height != expected_first_height {
@@ -725,7 +727,7 @@ where
 			return Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD segment order"));
 		}
 
-		match self.process_ready_pihd_header_segments(peer_info)? {
+		match self.process_ready_pihd_header_segments()? {
 			Some(bad_peer) if bad_peer.addr == peer_info.addr => {
 				Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD headers"))
 			}
@@ -977,7 +979,13 @@ where
 			return Ok(true);
 		}
 		if id.idx > next_idx.saturating_add(PIHD_HEADER_CACHE_LOOKAHEAD_SEGMENTS) {
-			return Ok(false);
+			debug!(
+				"dropping requested PIHD header segment {:?} from {} beyond current lookahead window",
+				id, peer_info.addr
+			);
+			self.sync_state
+				.remove_pihd_header_segment(id, peer_info.addr.0);
+			return Ok(true);
 		}
 
 		let mut cache = self.pihd_header_cache.write();
@@ -1005,13 +1013,14 @@ where
 		Ok(true)
 	}
 
-	fn process_ready_pihd_header_segments(
-		&self,
-		_current_peer: &PeerInfo,
-	) -> Result<Option<PeerInfo>, chain::Error> {
+	fn process_ready_pihd_header_segments(&self) -> Result<Option<PeerInfo>, chain::Error> {
 		loop {
 			let sync_head = match self.sync_state.status() {
-				SyncStatus::HeaderSync { sync_head, .. } => sync_head,
+				SyncStatus::HeaderSync {
+					sync_head,
+					sync_mode: HeaderSyncMode::Pihd,
+					..
+				} => sync_head,
 				_ => {
 					self.clear_pihd_header_cache();
 					return Ok(None);
@@ -1040,7 +1049,7 @@ where
 						entry.id, entry.peer_info.addr, e
 					);
 					self.clear_pihd_header_cache();
-					self.sync_state.retain_pihd_header_segments(|_| false);
+					self.sync_state.clear_pihd_header_segments();
 					return Ok(None);
 				}
 			};
@@ -1064,18 +1073,21 @@ where
 	fn prune_pihd_header_cache(&self, sync_head: chain::Tip) {
 		let next_idx = sync_head.height / p2p::pihd_header_segment_capacity();
 		let max_idx = next_idx.saturating_add(PIHD_HEADER_CACHE_LOOKAHEAD_SEGMENTS);
+		let generation = self.sync_state.pihd_header_cache_generation();
 		let clear_cache = {
 			let mut anchor = self.pihd_header_cache_anchor.write();
 			let clear_cache = match anchor.as_ref() {
 				None => false,
 				Some(prev) => {
-					sync_head.height < prev.height
+					prev.generation != generation
+						|| sync_head.height < prev.height
 						|| (sync_head.height == prev.height && sync_head.last_block_h != prev.hash)
 				}
 			};
 			*anchor = Some(PihdHeaderCacheAnchor {
 				height: sync_head.height,
 				hash: sync_head.last_block_h,
+				generation,
 			});
 			clear_cache
 		};
@@ -1090,6 +1102,19 @@ where
 	fn clear_pihd_header_cache(&self) {
 		self.pihd_header_cache.write().clear();
 		*self.pihd_header_cache_anchor.write() = None;
+	}
+
+	fn clear_stale_pihd_header_cache(&self) {
+		let generation = self.sync_state.pihd_header_cache_generation();
+		let reset = self
+			.pihd_header_cache_anchor
+			.read()
+			.as_ref()
+			.map(|prev| prev.generation != generation)
+			.unwrap_or(false);
+		if reset {
+			self.clear_pihd_header_cache();
+		}
 	}
 
 	// Find the first locator hash that refers to a known header on our main chain.

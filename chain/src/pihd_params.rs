@@ -25,8 +25,11 @@ pub const MAX_REQUESTS_PER_TICK: usize = 8;
 /// Maximum number of in-flight header segment requests per peer.
 pub const MAX_IN_FLIGHT_SEGMENTS_PER_PEER: usize = 2;
 
-/// Number of seconds before treating a PIHD or legacy header request as timed out.
-pub const HEADER_REQUEST_TIMEOUT_SECS: i64 = 10;
+/// Number of seconds before treating a PIHD header segment request as timed out.
+pub const PIHD_HEADER_REQUEST_TIMEOUT_SECS: i64 = 20;
+
+/// Number of seconds before treating a legacy header request as timed out.
+pub const LEGACY_HEADER_REQUEST_TIMEOUT_SECS: i64 = 10;
 
 /// Number of timeouts before falling back temporarily.
 pub const MAX_TIMED_OUT_SEGMENTS: usize = 3;
