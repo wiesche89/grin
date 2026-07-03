@@ -761,18 +761,6 @@ impl SyncState {
 			.count()
 	}
 
-	/// Check whether a PIHD header segment was requested from the given peer.
-	pub fn contains_pihd_header_segment_from(
-		&self,
-		id: SegmentIdentifier,
-		peer_addr: SocketAddr,
-	) -> bool {
-		self.requested_pihd_header_segments
-			.read()
-			.iter()
-			.any(|i| i.identifier == id && i.peer_addr == peer_addr)
-	}
-
 	/// Highest header height expected for a pending PIHD header segment request.
 	pub fn pihd_header_segment_target_height(
 		&self,
@@ -1203,8 +1191,6 @@ mod tests {
 
 		sync_state.add_pihd_header_segment(id, peer_addr, 1_024);
 
-		assert!(sync_state.contains_pihd_header_segment_from(id, peer_addr));
-		assert!(!sync_state.contains_pihd_header_segment_from(id, other_peer));
 		assert_eq!(
 			sync_state.pihd_header_segment_target_height(id, peer_addr),
 			Some(1_024)
@@ -1242,8 +1228,14 @@ mod tests {
 		sync_state.add_pihd_header_segment(second, peer_addr, 1_536);
 		sync_state.retain_pihd_header_segments(|req| req.identifier.idx >= 2);
 
-		assert!(!sync_state.contains_pihd_header_segment_from(first, peer_addr));
-		assert!(sync_state.contains_pihd_header_segment_from(second, peer_addr));
+		assert_eq!(
+			sync_state.pihd_header_segment_target_height(first, peer_addr),
+			None
+		);
+		assert_eq!(
+			sync_state.pihd_header_segment_target_height(second, peer_addr),
+			Some(1_536)
+		);
 	}
 
 	#[test]
@@ -1256,7 +1248,10 @@ mod tests {
 		sync_state.add_pihd_header_segment(id, peer_addr, 1_024);
 		sync_state.clear_pihd_header_segments();
 
-		assert!(!sync_state.contains_pihd_header_segment_from(id, peer_addr));
+		assert_eq!(
+			sync_state.pihd_header_segment_target_height(id, peer_addr),
+			None
+		);
 		assert!(sync_state.pihd_header_cache_generation() > generation);
 	}
 
@@ -1269,7 +1264,10 @@ mod tests {
 		sync_state.add_pihd_header_segment(id, peer_addr, 1_024);
 		sync_state.reject_pihd_header_segment_from(id, peer_addr);
 
-		assert!(!sync_state.contains_pihd_header_segment_from(id, peer_addr));
+		assert_eq!(
+			sync_state.pihd_header_segment_target_height(id, peer_addr),
+			None
+		);
 		assert_eq!(sync_state.take_rejected_pihd_peers(), vec![peer_addr]);
 		assert!(sync_state.take_rejected_pihd_peers().is_empty());
 	}

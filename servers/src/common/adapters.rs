@@ -679,27 +679,26 @@ where
 		if id.height != p2p::PIHD_HEADER_SEGMENT_HEIGHT {
 			return Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD segment height"));
 		}
-		if !self
+		let target_height = match self
 			.sync_state
-			.contains_pihd_header_segment_from(id, peer_info.addr.0)
+			.pihd_header_segment_target_height(id, peer_info.addr.0)
 		{
-			debug!(
-				"ignoring unsolicited PIHD header segment {:?} from {}",
-				id, peer_info.addr
-			);
-			self.clear_stale_pihd_header_cache();
-			return Ok(HeaderSegmentAcceptance::Accepted);
-		}
+			Some(height) => height,
+			None => {
+				debug!(
+					"ignoring unsolicited PIHD header segment {:?} from {}",
+					id, peer_info.addr
+				);
+				self.clear_stale_pihd_header_cache();
+				return Ok(HeaderSegmentAcceptance::Accepted);
+			}
+		};
 		let expected_first_height = match p2p::pihd_header_segment_start_height(id) {
 			Some(height) => height,
 			None => {
 				return Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD segment index"));
 			}
 		};
-		let target_height = self
-			.sync_state
-			.pihd_header_segment_target_height(id, peer_info.addr.0)
-			.unwrap_or(0);
 		if headers.is_empty() {
 			// Keep the request pending so repeated empty responses hit the normal timeout path.
 			debug!(
