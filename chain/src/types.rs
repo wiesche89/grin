@@ -268,6 +268,7 @@ pub struct RejectedPIBDPeer {
 
 const MAX_REJECTED_PIBD_SEGMENTS: usize = 1024;
 const MAX_REJECTED_PIBD_PEERS: usize = 1024;
+const MAX_REJECTED_PIHD_PEERS: usize = 1024;
 const REJECTED_PIBD_PEER_THRESHOLD: u32 = 3;
 
 /// Container for pending PIHD header segment requests.
@@ -309,6 +310,7 @@ pub struct SyncState {
 	rejected_pibd_segments: RwLock<Vec<RejectedPIBDSegment>>,
 	rejected_pibd_peers: RwLock<Vec<RejectedPIBDPeer>>,
 	requested_pihd_header_segments: RwLock<Vec<PIHDHeaderSegmentContainer>>,
+	rejected_pihd_peers: RwLock<Vec<SocketAddr>>,
 	pihd_header_cache_generation: AtomicU64,
 }
 
@@ -322,6 +324,7 @@ impl SyncState {
 			rejected_pibd_segments: RwLock::new(vec![]),
 			rejected_pibd_peers: RwLock::new(vec![]),
 			requested_pihd_header_segments: RwLock::new(vec![]),
+			rejected_pihd_peers: RwLock::new(vec![]),
 			pihd_header_cache_generation: AtomicU64::new(0),
 		}
 	}
@@ -723,6 +726,22 @@ impl SyncState {
 		self.requested_pihd_header_segments
 			.write()
 			.retain(|i| i.identifier != id || i.peer_addr != peer_addr);
+	}
+
+	/// Mark a PIHD header segment request as failed for this peer.
+	pub fn reject_pihd_header_segment_from(&self, id: SegmentIdentifier, peer_addr: SocketAddr) {
+		self.remove_pihd_header_segment(id, peer_addr);
+		let mut rejected = self.rejected_pihd_peers.write();
+		rejected.push(peer_addr);
+		if rejected.len() > MAX_REJECTED_PIHD_PEERS {
+			rejected.remove(0);
+		}
+	}
+
+	/// Drain recent PIHD peer failures for the sync loop.
+	pub fn take_rejected_pihd_peers(&self) -> Vec<SocketAddr> {
+		let mut rejected = self.rejected_pihd_peers.write();
+		std::mem::take(&mut *rejected)
 	}
 
 	/// Check whether a PIHD header segment was requested.
@@ -1239,6 +1258,20 @@ mod tests {
 
 		assert!(!sync_state.contains_pihd_header_segment_from(id, peer_addr));
 		assert!(sync_state.pihd_header_cache_generation() > generation);
+	}
+
+	#[test]
+	fn rejected_pihd_peers_are_drained() {
+		let sync_state = SyncState::new();
+		let id = SegmentIdentifier { height: 9, idx: 1 };
+		let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000);
+
+		sync_state.add_pihd_header_segment(id, peer_addr, 1_024);
+		sync_state.reject_pihd_header_segment_from(id, peer_addr);
+
+		assert!(!sync_state.contains_pihd_header_segment_from(id, peer_addr));
+		assert_eq!(sync_state.take_rejected_pihd_peers(), vec![peer_addr]);
+		assert!(sync_state.take_rejected_pihd_peers().is_empty());
 	}
 
 	#[test]

@@ -14,11 +14,11 @@
 
 use chrono::prelude::{DateTime, Utc};
 use chrono::Duration;
+use rand::seq::SliceRandom;
 use std::sync::Arc;
 
 use crate::chain::{
-	self, pibd_params, pihd_params, types::PIHDHeaderSegmentContainer, HeaderSyncMode, SyncState,
-	SyncStatus,
+	self, pihd_params, types::PIHDHeaderSegmentContainer, HeaderSyncMode, SyncState, SyncStatus,
 };
 use crate::common::types::Error;
 use crate::core::core::hash::Hash;
@@ -100,21 +100,11 @@ impl HeaderSync {
 		};
 
 		if pihd_peers.is_empty() {
-			if self.pihd_active {
-				info!(
-						"sync: PIHD header sync aborted at height {}; falling back to legacy header sync",
-						sync_head.height
-					);
-				self.pihd_active = false;
-			}
-			self.sync_state.clear_pihd_header_segments();
-
 			let sync_peer = self
-				.syncing_peer
-				.clone()
-				.filter(|p| self.peers.get_connected_peer(p.info.addr).is_some())
-				.map(|p| Some(p))
-				.unwrap_or_else(|| self.choose_sync_peer());
+				.pending_legacy
+				.as_ref()
+				.and_then(|req| self.peers.get_connected_peer(req.peer_addr))
+				.or_else(|| self.choose_sync_peer());
 			if let Some(sync_peer) = sync_peer {
 				let (peer_height, peer_diff) = {
 					let info = sync_peer.info.live_info.read();
@@ -129,8 +119,18 @@ impl HeaderSync {
 							sync_head.height, sync_head.total_difficulty
 						);
 						self.pihd_active = false;
+						self.sync_state.clear_pihd_header_segments();
 					}
 					return Ok(false);
+				}
+
+				if self.pihd_active {
+					info!(
+						"sync: PIHD header sync aborted at height {}; falling back to legacy header sync",
+						sync_head.height
+					);
+					self.pihd_active = false;
+					self.sync_state.clear_pihd_header_segments();
 				}
 
 				self.sync_state.update(SyncStatus::HeaderSync {
@@ -144,6 +144,13 @@ impl HeaderSync {
 				} else {
 					self.syncing_peer = None;
 				}
+			} else if self.pihd_active {
+				info!(
+					"sync: PIHD header sync aborted at height {}; no eligible PIHD peers",
+					sync_head.height
+				);
+				self.pihd_active = false;
+				self.sync_state.clear_pihd_header_segments();
 			}
 		} else {
 			if !self.pihd_active {
@@ -177,12 +184,9 @@ impl HeaderSync {
 		// Returns conditions to retain pihd segments.
 		let retain_pihd_segment_conditions =
 			|req: &PIHDHeaderSegmentContainer| -> (bool, bool, bool) {
-				let completed_height = req
-					.identifier
-					.idx
-					.saturating_mul(req.identifier.segment_capacity())
-					.saturating_add(req.identifier.segment_capacity());
-				let completed_height = completed_height.min(req.target_height);
+				let completed_height = p2p::pihd_header_segment_end_height(req.identifier)
+					.unwrap_or(u64::MAX)
+					.min(req.target_height);
 				let connected = peers.get_connected_peer(PeerAddr(req.peer_addr)).is_some();
 				let complete = header_head.height >= completed_height;
 				let timeout = now
@@ -210,6 +214,16 @@ impl HeaderSync {
 				self.note_pihd_peer_failure(peer_addr, now);
 			}
 			self.pihd_failure_count += newly_failed;
+			if self.pihd_stalling_ts.is_none() {
+				self.pihd_stalling_ts = Some(now);
+			}
+		}
+		let rejected_peers = self.sync_state.take_rejected_pihd_peers();
+		if !rejected_peers.is_empty() {
+			for peer_addr in &rejected_peers {
+				self.note_pihd_peer_failure(PeerAddr(*peer_addr), now);
+			}
+			self.pihd_failure_count += rejected_peers.len();
 			if self.pihd_stalling_ts.is_none() {
 				self.pihd_stalling_ts = Some(now);
 			}
@@ -380,20 +394,35 @@ impl HeaderSync {
 				.with_capabilities(Capabilities::HEADER_HIST)
 				.connected()
 		};
-		let max_diff = peers_iter().max_difficulty().unwrap_or(Difficulty::zero());
-		let max_height = peers_iter()
-			.into_iter()
-			.map(|p| p.info.height())
-			.max()
-			.unwrap_or(0);
-		let height_slack = pibd_params::SYNC_PEER_HEIGHT_SLACK_BLOCKS;
-		let peers = peers_iter()
+		let candidates: Vec<_> = peers_iter()
 			.with_capabilities(Capabilities::PIHD_HIST)
 			.with_difficulty(|x| x > sync_head.total_difficulty)
 			.with_filter(|p| p.info.height() > sync_head.height)
-			.with_filter(|p| p.info.height().saturating_add(height_slack) >= max_height)
 			.into_iter()
 			.collect();
+		let max_height = candidates
+			.iter()
+			.map(|p| p.info.height())
+			.max()
+			.unwrap_or(0);
+		let max_diff = candidates
+			.iter()
+			.map(|p| p.info.total_difficulty())
+			.max()
+			.unwrap_or(Difficulty::zero());
+		let mut rng = rand::thread_rng();
+		let mut peers: Vec<_> = candidates
+			.iter()
+			.filter(|p| p.info.is_outbound())
+			.cloned()
+			.collect();
+		peers.shuffle(&mut rng);
+		let mut inbound: Vec<_> = candidates
+			.into_iter()
+			.filter(|p| p.info.is_inbound())
+			.collect();
+		inbound.shuffle(&mut rng);
+		peers.extend(inbound);
 		(peers, max_height, max_diff)
 	}
 
@@ -431,7 +460,7 @@ impl HeaderSync {
 				height: PIHD_HEADER_SEGMENT_HEIGHT,
 				idx: segment_idx,
 			};
-			let start_height = match pihd_segment_start_height(identifier) {
+			let start_height = match p2p::pihd_header_segment_start_height(identifier) {
 				Some(height) => height,
 				None => return,
 			};
@@ -505,12 +534,6 @@ impl HeaderSync {
 	}
 }
 
-fn pihd_segment_start_height(id: SegmentIdentifier) -> Option<u64> {
-	id.idx
-		.checked_mul(id.segment_capacity())
-		.and_then(|height| height.checked_add(1))
-}
-
 // current height back to 0 decreasing in powers of 2
 fn get_locator_heights(height: u64) -> Vec<u64> {
 	let mut current = height;
@@ -558,21 +581,21 @@ mod test {
 			p2p::MAX_BLOCK_HEADERS as u64
 		);
 		assert_eq!(
-			pihd_segment_start_height(SegmentIdentifier {
+			p2p::pihd_header_segment_start_height(SegmentIdentifier {
 				height: PIHD_HEADER_SEGMENT_HEIGHT,
 				idx: 0
 			}),
 			Some(1)
 		);
 		assert_eq!(
-			pihd_segment_start_height(SegmentIdentifier {
+			p2p::pihd_header_segment_start_height(SegmentIdentifier {
 				height: PIHD_HEADER_SEGMENT_HEIGHT,
 				idx: 1
 			}),
 			Some(p2p::pihd_header_segment_capacity() + 1)
 		);
 		assert_eq!(
-			pihd_segment_start_height(SegmentIdentifier {
+			p2p::pihd_header_segment_start_height(SegmentIdentifier {
 				height: PIHD_HEADER_SEGMENT_HEIGHT,
 				idx: u64::MAX
 			}),

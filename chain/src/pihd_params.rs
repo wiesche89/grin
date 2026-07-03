@@ -31,10 +31,10 @@ pub const PIHD_HEADER_REQUEST_TIMEOUT_SECS: i64 = 20;
 /// Number of seconds before treating a legacy header request as timed out.
 pub const LEGACY_HEADER_REQUEST_TIMEOUT_SECS: i64 = 10;
 
-/// Number of timeouts before falling back temporarily.
+/// Number of failed segment requests before falling back temporarily.
 pub const MAX_TIMED_OUT_SEGMENTS: usize = 3;
 
-/// Number of seconds PIHD is disabled after repeated timeout stalls.
+/// Number of seconds PIHD is disabled after repeated segment failures.
 pub const DISABLE_SECS: i64 = 120;
 
 /// Number of seconds before retrying a peer after a timed-out PIHD request.

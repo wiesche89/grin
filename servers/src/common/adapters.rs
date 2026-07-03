@@ -690,11 +690,7 @@ where
 			self.clear_stale_pihd_header_cache();
 			return Ok(HeaderSegmentAcceptance::Accepted);
 		}
-		let expected_first_height = match id
-			.idx
-			.checked_mul(id.segment_capacity())
-			.and_then(|height| height.checked_add(1))
-		{
+		let expected_first_height = match p2p::pihd_header_segment_start_height(id) {
 			Some(height) => height,
 			None => {
 				return Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD segment index"));
@@ -718,14 +714,38 @@ where
 		if !headers.windows(2).all(|w| w[1].height == w[0].height + 1) {
 			return Ok(self.reject_bad_header_segment(peer_info, "non-contiguous PIHD segment"));
 		}
+		if !headers.windows(2).all(|w| w[1].prev_hash == w[0].hash()) {
+			return Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD segment chain"));
+		}
+		let expected_last_height = match p2p::pihd_header_segment_end_height(id) {
+			Some(height) => height.min(target_height),
+			None => {
+				return Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD segment index"));
+			}
+		};
+		if target_height >= expected_first_height
+			&& headers
+				.last()
+				.map(|header| header.height < expected_last_height)
+				.unwrap_or(false)
+		{
+			debug!(
+				"PIHD header segment {:?} from {} ended at height {}, expected at least {}",
+				id,
+				peer_info.addr,
+				headers.last().map(|header| header.height).unwrap_or(0),
+				expected_last_height
+			);
+			self.sync_state
+				.reject_pihd_header_segment_from(id, peer_info.addr.0);
+			return Ok(HeaderSegmentAcceptance::Accepted);
+		}
 		let sync_head = match self.sync_state.status() {
 			SyncStatus::HeaderSync { sync_head, .. } => sync_head,
 			_ => return Ok(HeaderSegmentAcceptance::Accepted),
 		};
 
-		if !self.cache_pihd_header_segment(id, headers, peer_info, target_height, sync_head)? {
-			return Ok(self.reject_bad_header_segment(peer_info, "invalid PIHD segment order"));
-		}
+		self.cache_pihd_header_segment(id, headers, peer_info, target_height, sync_head);
 
 		match self.process_ready_pihd_header_segments()? {
 			Some(bad_peer) if bad_peer.addr == peer_info.addr => {
@@ -969,14 +989,14 @@ where
 		peer_info: &PeerInfo,
 		target_height: u64,
 		sync_head: chain::Tip,
-	) -> Result<bool, chain::Error> {
-		self.prune_pihd_header_cache(sync_head.clone());
+	) {
+		self.prune_pihd_header_cache(sync_head);
 
 		let next_idx = sync_head.height / p2p::pihd_header_segment_capacity();
 		if id.idx < next_idx {
 			self.sync_state
 				.remove_pihd_header_segment(id, peer_info.addr.0);
-			return Ok(true);
+			return;
 		}
 		if id.idx > next_idx.saturating_add(PIHD_HEADER_CACHE_LOOKAHEAD_SEGMENTS) {
 			debug!(
@@ -985,21 +1005,27 @@ where
 			);
 			self.sync_state
 				.remove_pihd_header_segment(id, peer_info.addr.0);
-			return Ok(true);
+			return;
 		}
 
 		let mut cache = self.pihd_header_cache.write();
 		if cache.iter().any(|entry| entry.id == id) {
 			self.sync_state
 				.remove_pihd_header_segment(id, peer_info.addr.0);
-			return Ok(true);
+			return;
 		}
 		if cache.len() >= MAX_CACHED_PIHD_HEADER_SEGMENTS {
 			cache.sort_by_key(|entry| entry.id.idx);
 			if let Some(pos) = cache.iter().rposition(|entry| entry.id.idx != next_idx) {
 				cache.remove(pos);
 			} else {
-				return Ok(false);
+				debug!(
+					"dropping requested PIHD header segment {:?} from {} under cache pressure",
+					id, peer_info.addr
+				);
+				self.sync_state
+					.remove_pihd_header_segment(id, peer_info.addr.0);
+				return;
 			}
 		}
 		cache.push(PihdHeaderSegmentCacheEntry {
@@ -1010,7 +1036,6 @@ where
 		});
 		self.sync_state
 			.remove_pihd_header_segment(id, peer_info.addr.0);
-		Ok(true)
 	}
 
 	fn process_ready_pihd_header_segments(&self) -> Result<Option<PeerInfo>, chain::Error> {
@@ -1026,7 +1051,7 @@ where
 					return Ok(None);
 				}
 			};
-			self.prune_pihd_header_cache(sync_head.clone());
+			self.prune_pihd_header_cache(sync_head);
 
 			let next_id = SegmentIdentifier {
 				height: p2p::PIHD_HEADER_SEGMENT_HEIGHT,
@@ -1048,9 +1073,10 @@ where
 						"PIHD header segment {:?} from {} did not connect cleanly: {:?}",
 						entry.id, entry.peer_info.addr, e
 					);
+					self.sync_state
+						.reject_pihd_header_segment_from(entry.id, entry.peer_info.addr.0);
 					self.clear_pihd_header_cache();
-					self.sync_state.clear_pihd_header_segments();
-					return Ok(None);
+					return Err(e);
 				}
 			};
 			if !accepted {
@@ -1064,7 +1090,6 @@ where
 				.map(|header| header.height >= entry.target_height)
 				.unwrap_or(false)
 			{
-				self.clear_pihd_header_cache();
 				return Ok(None);
 			}
 		}
