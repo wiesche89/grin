@@ -483,6 +483,10 @@ impl HeaderSync {
 				Some(peer) => peer.clone(),
 				None => return,
 			};
+			debug!(
+				"Ask header segment {:?} from {}",
+				identifier, peer.info.addr
+			);
 			if peer.send_header_segment_request(identifier).is_ok() {
 				let target_height = peer.info.height();
 				self.sync_state.add_pihd_header_segment(
