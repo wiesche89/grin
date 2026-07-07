@@ -15,6 +15,7 @@
 use chrono::prelude::{DateTime, Utc};
 use chrono::Duration;
 use rand::seq::SliceRandom;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::chain::{
@@ -46,7 +47,6 @@ pub struct HeaderSync {
 	pihd_peer_timeout_until: Vec<(PeerAddr, DateTime<Utc>)>,
 	pihd_stalling_ts: Option<DateTime<Utc>>,
 	pihd_disabled_until: Option<DateTime<Utc>>,
-	pihd_active: bool,
 }
 
 impl HeaderSync {
@@ -67,7 +67,6 @@ impl HeaderSync {
 			pihd_peer_timeout_until: vec![],
 			pihd_stalling_ts: None,
 			pihd_disabled_until: None,
-			pihd_active: false,
 		}
 	}
 
@@ -92,6 +91,7 @@ impl HeaderSync {
 		if !self.header_sync_due(sync_head) {
 			return Ok(false);
 		}
+		self.syncing_peer = None;
 
 		let (pihd_peers, pihd_max_height, pihd_max_diff) = if self.pihd_enabled() {
 			self.choose_pihd_peers(sync_head)
@@ -104,6 +104,7 @@ impl HeaderSync {
 				.pending_legacy
 				.as_ref()
 				.and_then(|req| self.peers.get_connected_peer(req.peer_addr))
+				.filter(|peer| peer.info.total_difficulty() > sync_head.total_difficulty)
 				.or_else(|| self.choose_sync_peer());
 			if let Some(sync_peer) = sync_peer {
 				let (peer_height, peer_diff) = {
@@ -113,23 +114,21 @@ impl HeaderSync {
 
 				// Quick check - nothing to sync if we are caught up with the peer.
 				if peer_diff <= sync_head.total_difficulty {
-					if self.pihd_active {
+					if self.pihd_active() {
 						info!(
 							"sync: PIHD header sync completed at height {}, total difficulty {}",
 							sync_head.height, sync_head.total_difficulty
 						);
-						self.pihd_active = false;
 						self.sync_state.clear_pihd_header_segments();
 					}
 					return Ok(false);
 				}
 
-				if self.pihd_active {
+				if self.pihd_active() {
 					info!(
-						"sync: PIHD header sync aborted at height {}; falling back to legacy header sync",
-						sync_head.height
-					);
-					self.pihd_active = false;
+							"sync: PIHD header sync aborted at height {}; falling back to legacy header sync",
+							sync_head.height
+						);
 					self.sync_state.clear_pihd_header_segments();
 				}
 
@@ -139,27 +138,23 @@ impl HeaderSync {
 					highest_height: peer_height,
 					highest_diff: peer_diff,
 				});
-				if self.header_sync(sync_head, sync_peer.clone()) {
+				if self.request_headers(sync_head, sync_peer.clone()) {
 					self.syncing_peer = Some(sync_peer.clone());
-				} else {
-					self.syncing_peer = None;
 				}
-			} else if self.pihd_active {
+			} else if self.pihd_active() {
 				info!(
 					"sync: PIHD header sync aborted at height {}; no eligible PIHD peers",
 					sync_head.height
 				);
-				self.pihd_active = false;
 				self.sync_state.clear_pihd_header_segments();
 			}
 		} else {
-			if !self.pihd_active {
+			if !self.pihd_active() {
 				info!(
 					"sync: PIHD header sync started at height {} with {} eligible peer(s)",
 					sync_head.height,
 					pihd_peers.len()
 				);
-				self.pihd_active = true;
 			}
 			self.sync_state.update(SyncStatus::HeaderSync {
 				sync_head,
@@ -195,35 +190,28 @@ impl HeaderSync {
 				(complete, connected, timeout)
 			};
 
-		let mut newly_failed = 0;
-		let mut failed_peers = vec![];
+		let mut failed_peers = HashSet::new();
 		self.sync_state.retain_pihd_header_segments(|req| {
 			let (complete, connected, timeout) = retain_pihd_segment_conditions(req);
-			if !complete && connected && timeout {
-				newly_failed += 1;
-				failed_peers.push(PeerAddr(req.peer_addr));
+			if !complete && !req.responded {
+				if connected && timeout {
+					failed_peers.insert(PeerAddr(req.peer_addr));
+				}
+				if !connected {
+					failed_peers.insert(PeerAddr(req.peer_addr));
+				}
 			}
-			if !complete && !connected {
-				newly_failed += 1;
-				failed_peers.push(PeerAddr(req.peer_addr));
-			}
-			!complete && connected && !timeout
+			!complete && (req.responded || (connected && !timeout))
 		});
-		if newly_failed > 0 {
+		let rejected_peers = self.sync_state.take_rejected_pihd_peers();
+		for peer_addr in rejected_peers {
+			failed_peers.insert(PeerAddr(peer_addr));
+		}
+		if !failed_peers.is_empty() {
+			self.pihd_failure_count += failed_peers.len();
 			for peer_addr in failed_peers {
 				self.note_pihd_peer_failure(peer_addr, now);
 			}
-			self.pihd_failure_count += newly_failed;
-			if self.pihd_stalling_ts.is_none() {
-				self.pihd_stalling_ts = Some(now);
-			}
-		}
-		let rejected_peers = self.sync_state.take_rejected_pihd_peers();
-		if !rejected_peers.is_empty() {
-			for peer_addr in &rejected_peers {
-				self.note_pihd_peer_failure(PeerAddr(*peer_addr), now);
-			}
-			self.pihd_failure_count += rejected_peers.len();
 			if self.pihd_stalling_ts.is_none() {
 				self.pihd_stalling_ts = Some(now);
 			}
@@ -242,13 +230,12 @@ impl HeaderSync {
 					self.pihd_failure_count,
 					pihd_params::STALL_FALLBACK_SECS
 				);
-				if self.pihd_active {
+				if self.pihd_active() {
 					info!(
-						"sync: PIHD header sync aborted at height {}; failed {} header segment request(s), falling back to legacy header sync",
-						header_head.height,
-						self.pihd_failure_count
-					);
-					self.pihd_active = false;
+							"sync: PIHD header sync aborted at height {}; failed {} header segment request(s), falling back to legacy header sync",
+							header_head.height,
+							self.pihd_failure_count
+						);
 				}
 				self.sync_state.clear_pihd_header_segments();
 				self.pihd_failure_count = 0;
@@ -293,6 +280,24 @@ impl HeaderSync {
 			self.pihd_disabled_until = None;
 		}
 		true
+	}
+
+	fn pihd_active(&self) -> bool {
+		if self
+			.pihd_disabled_until
+			.map(|disabled_until| Utc::now() < disabled_until)
+			.unwrap_or(false)
+		{
+			return false;
+		}
+
+		matches!(
+			self.sync_state.status(),
+			SyncStatus::HeaderSync {
+				sync_mode: HeaderSyncMode::Pihd,
+				..
+			}
+		)
 	}
 
 	fn header_sync_due(&mut self, header_head: chain::Tip) -> bool {
@@ -426,14 +431,6 @@ impl HeaderSync {
 		(peers, max_height, max_diff)
 	}
 
-	fn header_sync(&mut self, sync_head: chain::Tip, peer: Arc<Peer>) -> bool {
-		if peer.info.total_difficulty() > sync_head.total_difficulty {
-			self.request_headers(sync_head, peer)
-		} else {
-			false
-		}
-	}
-
 	fn pihd_header_sync(&mut self, sync_head: chain::Tip, peers: Vec<Arc<Peer>>) {
 		let now = Utc::now();
 		self.pihd_peer_timeout_until
@@ -452,7 +449,7 @@ impl HeaderSync {
 			return;
 		}
 		let mut sent = 0;
-		let mut segment_idx = sync_head.height / p2p::pihd_header_segment_capacity();
+		let mut segment_idx = p2p::types::next_pihd_header_segment_idx(sync_head.height);
 		while self.sync_state.pending_pihd_segments_count() < pihd_params::MAX_IN_FLIGHT_SEGMENTS
 			&& sent < pihd_params::MAX_REQUESTS_PER_TICK
 		{
@@ -502,8 +499,14 @@ impl HeaderSync {
 	/// Request some block headers from a peer to advance us.
 	fn request_headers(&mut self, sync_head: chain::Tip, peer: Arc<Peer>) -> bool {
 		if let Some(req) = &self.pending_legacy {
-			return req.peer_addr == peer.info.addr
-				&& self.peers.get_connected_peer(peer.info.addr).is_some();
+			let pending_peer_addr = req.peer_addr;
+			if pending_peer_addr == peer.info.addr {
+				return self.peers.get_connected_peer(peer.info.addr).is_some();
+			}
+			if self.peers.get_connected_peer(pending_peer_addr).is_some() {
+				return false;
+			}
+			self.pending_legacy = None;
 		}
 		if self.peers.get_connected_peer(peer.info.addr).is_none() {
 			return false;

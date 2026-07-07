@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Static definitions for PIHD sync parameters
+//! Static definitions for PIHD sync and header-sync fallback parameters
 //! Note these are for experimentation via compilation, not meant to be exposed as
 //! configuration parameters anywhere
 

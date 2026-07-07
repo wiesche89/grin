@@ -87,6 +87,11 @@ pub fn pihd_header_segment_capacity() -> u64 {
 	capacity
 }
 
+/// Segment index containing the next header after the given sync height.
+pub fn next_pihd_header_segment_idx(height: u64) -> u64 {
+	height / pihd_header_segment_capacity()
+}
+
 /// First header height covered by a PIHD header segment.
 pub fn pihd_header_segment_start_height(id: SegmentIdentifier) -> Option<u64> {
 	id.idx

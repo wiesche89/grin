@@ -278,6 +278,8 @@ pub struct PIHDHeaderSegmentContainer {
 	pub identifier: SegmentIdentifier,
 	/// Time at which this request was made
 	pub request_time: DateTime<Utc>,
+	/// Whether a response for this request has been received and cached.
+	pub responded: bool,
 	/// Peer that received this request
 	pub peer_addr: SocketAddr,
 	/// Highest header height advertised by the peer when requested
@@ -290,6 +292,7 @@ impl PIHDHeaderSegmentContainer {
 		Self {
 			identifier,
 			request_time: Utc::now(),
+			responded: false,
 			peer_addr,
 			target_height,
 		}
@@ -711,6 +714,7 @@ impl SyncState {
 			.find(|i| i.identifier == id && i.peer_addr == peer_addr)
 		{
 			existing.request_time = Utc::now();
+			existing.responded = false;
 			existing.target_height = target_height;
 		} else {
 			requested_segments.push(PIHDHeaderSegmentContainer::new(
@@ -718,6 +722,18 @@ impl SyncState {
 				peer_addr,
 				target_height,
 			));
+		}
+	}
+
+	/// Mark a pending PIHD header segment request as having received a response.
+	pub fn mark_pihd_header_segment_responded(&self, id: SegmentIdentifier, peer_addr: SocketAddr) {
+		if let Some(existing) = self
+			.requested_pihd_header_segments
+			.write()
+			.iter_mut()
+			.find(|i| i.identifier == id && i.peer_addr == peer_addr)
+		{
+			existing.responded = true;
 		}
 	}
 
@@ -1215,6 +1231,30 @@ mod tests {
 			sync_state.pihd_header_segment_target_height(id, peer_addr),
 			Some(2_048)
 		);
+	}
+
+	#[test]
+	fn pihd_header_segment_retry_resets_response() {
+		let sync_state = SyncState::new();
+		let id = SegmentIdentifier { height: 9, idx: 1 };
+		let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000);
+
+		sync_state.add_pihd_header_segment(id, peer_addr, 1_024);
+		sync_state.mark_pihd_header_segment_responded(id, peer_addr);
+		assert!(sync_state
+			.requested_pihd_header_segments
+			.read()
+			.iter()
+			.any(|req| req.identifier == id && req.peer_addr == peer_addr && req.responded));
+
+		sync_state.add_pihd_header_segment(id, peer_addr, 2_048);
+		let requested_segments = sync_state.requested_pihd_header_segments.read();
+		let req = requested_segments
+			.iter()
+			.find(|req| req.identifier == id && req.peer_addr == peer_addr)
+			.unwrap();
+		assert!(!req.responded);
+		assert_eq!(req.target_height, 2_048);
 	}
 
 	#[test]
