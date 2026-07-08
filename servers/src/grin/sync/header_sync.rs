@@ -14,7 +14,7 @@
 
 use chrono::prelude::{DateTime, Utc};
 use chrono::Duration;
-use rand::seq::SliceRandom;
+use rand::seq::{IteratorRandom, SliceRandom};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -433,6 +433,7 @@ impl HeaderSync {
 
 	fn pihd_header_sync(&mut self, sync_head: chain::Tip, peers: Vec<Arc<Peer>>) {
 		let now = Utc::now();
+		let mut rng = rand::thread_rng();
 		self.pihd_peer_timeout_until
 			.retain(|(_, until)| *until > now);
 		let preferred_peers = peers
@@ -472,15 +473,40 @@ impl HeaderSync {
 						.pending_pihd_segments_count_from(peer.info.addr.0)
 						< max_in_flight
 			};
-			let peer = match peers
+			let peer = peers
 				.iter()
-				.find(|peer| can_request(peer, pihd_params::MAX_IN_FLIGHT_SEGMENTS_PER_PEER))
+				.filter(|peer| peer.info.is_outbound())
+				.filter(|peer| can_request(peer, pihd_params::MAX_IN_FLIGHT_SEGMENTS_PER_PEER))
+				.choose(&mut rng)
+				.cloned()
 				.or_else(|| {
 					peers
 						.iter()
-						.find(|peer| can_request(peer, pihd_params::MAX_IN_FLIGHT_SEGMENTS))
-				}) {
-				Some(peer) => peer.clone(),
+						.filter(|peer| peer.info.is_inbound())
+						.filter(|peer| {
+							can_request(peer, pihd_params::MAX_IN_FLIGHT_SEGMENTS_PER_PEER)
+						})
+						.choose(&mut rng)
+						.cloned()
+				})
+				.or_else(|| {
+					peers
+						.iter()
+						.filter(|peer| peer.info.is_outbound())
+						.filter(|peer| can_request(peer, pihd_params::MAX_IN_FLIGHT_SEGMENTS))
+						.choose(&mut rng)
+						.cloned()
+				})
+				.or_else(|| {
+					peers
+						.iter()
+						.filter(|peer| peer.info.is_inbound())
+						.filter(|peer| can_request(peer, pihd_params::MAX_IN_FLIGHT_SEGMENTS))
+						.choose(&mut rng)
+						.cloned()
+				});
+			let peer = match peer {
+				Some(peer) => peer,
 				None => return,
 			};
 			debug!(
