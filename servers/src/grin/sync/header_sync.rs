@@ -86,6 +86,8 @@ impl HeaderSync {
 			return Ok(false);
 		}
 
+		self.cleanup_pending_requests(sync_head);
+
 		if !self.header_sync_due(sync_head) {
 			return Ok(false);
 		}
@@ -162,8 +164,6 @@ impl HeaderSync {
 			});
 			self.pihd_header_sync(sync_head, pihd_peers);
 			self.syncing_peer = None;
-
-			self.cleanup_pending_requests(sync_head);
 		}
 		Ok(true)
 	}

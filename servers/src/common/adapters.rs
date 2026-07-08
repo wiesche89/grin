@@ -1036,13 +1036,8 @@ where
 			headers: headers.to_vec(),
 			peer_info: peer_info.clone(),
 		});
-		if id.idx == next_idx {
-			self.sync_state
-				.remove_pihd_header_segment(id, peer_info.addr.0);
-		} else {
-			self.sync_state
-				.mark_pihd_header_segment_responded(id, peer_info.addr.0);
-		}
+		self.sync_state
+			.mark_pihd_header_segment_responded(id, peer_info.addr.0);
 	}
 
 	fn process_ready_pihd_header_segments(&self) -> Result<Option<PeerInfo>, chain::Error> {
@@ -1085,8 +1080,12 @@ where
 				}
 			};
 			if !accepted {
+				self.sync_state
+					.reject_pihd_header_segment_from(entry.id, entry.peer_info.addr.0);
 				return Ok(Some(entry.peer_info));
 			}
+			self.sync_state
+				.remove_pihd_header_segment(entry.id, entry.peer_info.addr.0);
 		}
 	}
 
