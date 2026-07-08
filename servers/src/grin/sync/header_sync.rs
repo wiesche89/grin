@@ -35,6 +35,13 @@ struct LegacyHeaderRequest {
 	requested_at: DateTime<Utc>,
 }
 
+struct PIHDPeerFailure {
+	peer_addr: PeerAddr,
+	last_failure: DateTime<Utc>,
+	cooldown_until: DateTime<Utc>,
+	failure_count: usize,
+}
+
 pub struct HeaderSync {
 	sync_state: Arc<SyncState>,
 	peers: Arc<p2p::Peers>,
@@ -44,7 +51,7 @@ pub struct HeaderSync {
 	stalling_ts: Option<DateTime<Utc>>,
 	pending_legacy: Option<LegacyHeaderRequest>,
 	pihd_failure_count: usize,
-	pihd_peer_timeout_until: Vec<(PeerAddr, DateTime<Utc>)>,
+	pihd_peer_failures: Vec<PIHDPeerFailure>,
 	pihd_stalling_ts: Option<DateTime<Utc>>,
 	pihd_disabled_until: Option<DateTime<Utc>>,
 }
@@ -64,7 +71,7 @@ impl HeaderSync {
 			stalling_ts: None,
 			pending_legacy: None,
 			pihd_failure_count: 0,
-			pihd_peer_timeout_until: vec![],
+			pihd_peer_failures: vec![],
 			pihd_stalling_ts: None,
 			pihd_disabled_until: None,
 		}
@@ -210,7 +217,10 @@ impl HeaderSync {
 		if !failed_peers.is_empty() {
 			self.pihd_failure_count += failed_peers.len();
 			for peer_addr in failed_peers {
-				self.note_pihd_peer_failure(peer_addr, now);
+				let failure_count = self.note_pihd_peer_failure(peer_addr, now);
+				if failure_count >= pihd_params::MAX_PEER_FAILURES_BEFORE_BLOCK {
+					self.block_pihd_peer(peer_addr);
+				}
 			}
 			if self.pihd_stalling_ts.is_none() {
 				self.pihd_stalling_ts = Some(now);
@@ -256,20 +266,45 @@ impl HeaderSync {
 		}
 	}
 
-	fn note_pihd_peer_failure(&mut self, peer_addr: PeerAddr, now: DateTime<Utc>) {
-		self.pihd_peer_timeout_until
-			.retain(|(addr, until)| *addr != peer_addr && *until > now);
-		self.pihd_peer_timeout_until.push((
-			peer_addr,
-			now + Duration::seconds(pihd_params::PEER_TIMEOUT_COOLDOWN_SECS),
-		));
+	fn note_pihd_peer_failure(&mut self, peer_addr: PeerAddr, now: DateTime<Utc>) -> usize {
+		record_pihd_peer_failure(&mut self.pihd_peer_failures, peer_addr, now)
+	}
+
+	fn block_pihd_peer(&self, peer_addr: PeerAddr) {
+		if self.peers.is_blocked(peer_addr) {
+			debug!(
+				"sync: peer {} already blocked after PIHD header segment failure",
+				peer_addr
+			);
+			return;
+		}
+
+		let _ = self
+			.peers
+			.block_peer(peer_addr, "PIHD header segment failure");
+		let is_outbound = self.peers.iter().outbound().by_addr(peer_addr).is_some();
+		if is_outbound {
+			debug!(
+				"sync: disconnecting outbound peer {} after PIHD header segment failure",
+				peer_addr
+			);
+			if let Err(e) = self
+				.peers
+				.disconnect_peer(peer_addr, "PIHD header segment failure")
+			{
+				debug!(
+					"sync: failed to disconnect PIHD peer {} after header segment failure: {:?}",
+					peer_addr, e
+				);
+			}
+		}
 	}
 
 	fn pihd_peer_available(&self, peer_addr: PeerAddr, now: DateTime<Utc>) -> bool {
 		!self
-			.pihd_peer_timeout_until
+			.pihd_peer_failures
 			.iter()
-			.any(|(addr, until)| *addr == peer_addr && *until > now)
+			.any(|failure| failure.peer_addr == peer_addr && failure.cooldown_until > now)
 	}
 
 	fn pihd_enabled(&mut self) -> bool {
@@ -434,17 +469,29 @@ impl HeaderSync {
 	fn pihd_header_sync(&mut self, sync_head: chain::Tip, peers: Vec<Arc<Peer>>) {
 		let now = Utc::now();
 		let mut rng = rand::thread_rng();
-		self.pihd_peer_timeout_until
-			.retain(|(_, until)| *until > now);
+		self.pihd_peer_failures
+			.retain(|failure| retain_pihd_peer_failure(failure, now));
 		let preferred_peers = peers
 			.iter()
-			.filter(|peer| self.pihd_peer_available(peer.info.addr, now))
+			.filter(|peer| {
+				self.pihd_peer_available(peer.info.addr, now)
+					&& !self.peers.is_blocked(peer.info.addr)
+			})
 			.cloned()
 			.collect::<Vec<_>>();
-		let peers = if preferred_peers.is_empty() {
+		let available_peers = if preferred_peers.is_empty() {
 			peers
+				.iter()
+				.filter(|peer| self.pihd_peer_available(peer.info.addr, now))
+				.cloned()
+				.collect::<Vec<_>>()
 		} else {
 			preferred_peers
+		};
+		let peers = if available_peers.is_empty() {
+			peers
+		} else {
+			available_peers
 		};
 		if self.sync_state.pending_pihd_segments_count() >= pihd_params::MAX_IN_FLIGHT_SEGMENTS {
 			return;
@@ -567,6 +614,37 @@ impl HeaderSync {
 	}
 }
 
+fn retain_pihd_peer_failure(failure: &PIHDPeerFailure, now: DateTime<Utc>) -> bool {
+	failure.last_failure + Duration::seconds(pihd_params::PEER_FAILURE_WINDOW_SECS) > now
+		|| failure.cooldown_until > now
+}
+
+fn record_pihd_peer_failure(
+	failures: &mut Vec<PIHDPeerFailure>,
+	peer_addr: PeerAddr,
+	now: DateTime<Utc>,
+) -> usize {
+	failures.retain(|failure| retain_pihd_peer_failure(failure, now));
+	let cooldown_until = now + Duration::seconds(pihd_params::PEER_TIMEOUT_COOLDOWN_SECS);
+	if let Some(failure) = failures
+		.iter_mut()
+		.find(|failure| failure.peer_addr == peer_addr)
+	{
+		failure.last_failure = now;
+		failure.cooldown_until = cooldown_until;
+		failure.failure_count = failure.failure_count.saturating_add(1);
+		failure.failure_count
+	} else {
+		failures.push(PIHDPeerFailure {
+			peer_addr,
+			last_failure: now,
+			cooldown_until,
+			failure_count: 1,
+		});
+		1
+	}
+}
+
 // current height back to 0 decreasing in powers of 2
 fn get_locator_heights(height: u64) -> Vec<u64> {
 	let mut current = height;
@@ -634,5 +712,44 @@ mod test {
 			}),
 			None
 		);
+	}
+
+	#[test]
+	fn test_pihd_peer_failure_count() {
+		let peer_addr = PeerAddr("127.0.0.1:13414".parse().unwrap());
+		let now = Utc::now();
+		let mut failures = vec![];
+
+		assert_eq!(record_pihd_peer_failure(&mut failures, peer_addr, now), 1);
+		assert_eq!(
+			record_pihd_peer_failure(&mut failures, peer_addr, now + Duration::seconds(10)),
+			2
+		);
+		assert_eq!(
+			record_pihd_peer_failure(&mut failures, peer_addr, now + Duration::seconds(20)),
+			3
+		);
+		assert_eq!(failures.len(), 1);
+		assert_eq!(
+			failures[0].cooldown_until,
+			now + Duration::seconds(20 + pihd_params::PEER_TIMEOUT_COOLDOWN_SECS)
+		);
+	}
+
+	#[test]
+	fn test_pihd_peer_failure_expiry() {
+		let peer_addr = PeerAddr("127.0.0.1:13414".parse().unwrap());
+		let now = Utc::now();
+		let old = now - Duration::seconds(pihd_params::PEER_FAILURE_WINDOW_SECS + 1);
+		let mut failures = vec![PIHDPeerFailure {
+			peer_addr,
+			last_failure: old,
+			cooldown_until: old + Duration::seconds(pihd_params::PEER_TIMEOUT_COOLDOWN_SECS),
+			failure_count: 2,
+		}];
+
+		assert_eq!(record_pihd_peer_failure(&mut failures, peer_addr, now), 1);
+		assert_eq!(failures.len(), 1);
+		assert_eq!(failures[0].last_failure, now);
 	}
 }
