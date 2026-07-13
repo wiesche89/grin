@@ -21,7 +21,7 @@ extern crate clap;
 extern crate log;
 use crate::config::config::SERVER_CONFIG_FILE_NAME;
 use crate::core::global;
-use crate::tools::check_seeds;
+use crate::tools::{check_seeds, scan_wallet_history};
 use crate::util::init_logger;
 use clap::App;
 use futures::channel::oneshot;
@@ -265,6 +265,27 @@ fn real_main() -> i32 {
 				println!("{}", output);
 			}
 			0
+		}
+
+		("wallet-history", Some(history_args)) => {
+			let db_root = history_args
+				.value_of("db_root")
+				.expect("db-root is required");
+			let output = history_args.value_of("output").expect("output is required");
+			match scan_wallet_history(db_root, output) {
+				Ok(summary) => {
+					println!(
+						"Recovered {} outputs ({} unspent), final balance: {} nanogrin",
+						summary.outputs, summary.unspent_outputs, summary.final_balance
+					);
+					println!("History written to {}", output);
+					0
+				}
+				Err(e) => {
+					eprintln!("Wallet history scan failed: {}", e);
+					1
+				}
+			}
 		}
 
 		// If nothing is specified, try to just use the config file instead

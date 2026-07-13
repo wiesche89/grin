@@ -111,3 +111,16 @@ subcommands:
               help: DNS seed hostname to check instead of the default seed list
               long: seed
               takes_value: true
+  - wallet-history:
+      about: Recover the complete history of a wallet from an archive chain database
+      args:
+          - db_root:
+              help: Path to the archive node chain_data directory
+              long: db-root
+              takes_value: true
+              required: true
+          - output:
+              help: JSON file to write
+              long: output
+              takes_value: true
+              required: true

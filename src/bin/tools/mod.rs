@@ -14,5 +14,7 @@
 
 /// Grin tools
 mod seedcheck;
+mod wallet_history;
 
 pub use seedcheck::check_seeds;
+pub use wallet_history::scan_wallet_history;
