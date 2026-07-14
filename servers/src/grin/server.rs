@@ -72,6 +72,7 @@ pub struct Server {
 	pub stop_state: Arc<StopState>,
 	/// Maintain a lock_file so we do not run multiple Grin nodes from same dir.
 	lock_file: Arc<File>,
+	start_time: time::Instant,
 	connect_thread: Option<JoinHandle<()>>,
 	sync_thread: JoinHandle<()>,
 	dandelion_thread: JoinHandle<()>,
@@ -153,6 +154,7 @@ impl Server {
 	) -> Result<Server, Error> {
 		// Obtain our lock_file or fail immediately with an error.
 		let lock_file = Server::one_grin_at_a_time(&config)?;
+		let start_time = time::Instant::now();
 
 		// Defaults to None (optional) in config file.
 		// This translates to false here.
@@ -339,6 +341,7 @@ impl Server {
 			},
 			stop_state,
 			lock_file,
+			start_time,
 			connect_thread,
 			sync_thread,
 			dandelion_thread,
@@ -542,6 +545,7 @@ impl Server {
 		let disk_usage_gb = format!("{:.*}", 3, (disk_usage_bytes as f64 / 1_000_000_000_f64));
 
 		Ok(ServerStats {
+			uptime_seconds: self.start_time.elapsed().as_secs(),
 			peer_count: self.peer_count(),
 			chain_stats: head_stats,
 			header_stats,
