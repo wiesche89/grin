@@ -1022,19 +1022,16 @@ dependencies = [
 name = "grin"
 version = "5.5.1-alpha.0"
 dependencies = [
- "blake2-rfc",
  "built",
  "chrono",
  "clap",
  "ctrlc",
  "cursive",
  "cursive_table_view",
- "futures 0.3.32",
  "grin_api",
  "grin_chain",
  "grin_config",
  "grin_core",
- "grin_keychain",
  "grin_p2p",
  "grin_servers",
  "grin_store",
@@ -1046,6 +1043,7 @@ dependencies = [
  "serde_json",
  "term",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

@@ -13,32 +13,32 @@
 // limitations under the License.
 
 /// Grin server commands processing
+use clap::ArgMatches;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
-
-use clap::ArgMatches;
 
 use crate::config::GlobalConfig;
 use crate::p2p::Seeding;
 use crate::servers;
 use crate::tui::ui;
-use futures::channel::oneshot;
 use grin_p2p::msg::PeerAddrs;
 use grin_p2p::PeerAddr;
 use grin_servers::common::types::ServerInitStatus;
 use grin_servers::Server;
 use grin_util::logger::LogEntry;
 use grin_util::StopState;
-use std::sync::mpsc;
 
 /// Start node server at TUI or non-TUI mode.
 pub fn start_server(
 	config: servers::ServerConfig,
 	logs_rx: Option<mpsc::Receiver<LogEntry>>,
-	api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
+	api_chan: (
+		tokio::sync::mpsc::Sender<()>,
+		tokio::sync::mpsc::Receiver<()>,
+	),
 ) {
 	let exit_code = if config.run_tui.unwrap_or(false) {
 		warn!("Starting GRIN in UI mode...");
@@ -110,7 +110,10 @@ pub fn server_command(
 	server_args: Option<&ArgMatches<'_>>,
 	global_config: GlobalConfig,
 	logs_rx: Option<mpsc::Receiver<LogEntry>>,
-	api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
+	api_chan: (
+		tokio::sync::mpsc::Sender<()>,
+		tokio::sync::mpsc::Receiver<()>,
+	),
 ) -> i32 {
 	// just get defaults from the global config
 	let mut server_config = global_config.members.as_ref().unwrap().server.clone();

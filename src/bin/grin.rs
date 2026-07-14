@@ -24,7 +24,6 @@ use crate::core::global;
 use crate::tools::check_seeds;
 use crate::util::init_logger;
 use clap::App;
-use futures::channel::oneshot;
 use grin_api as api;
 use grin_chain as chain;
 use grin_config as config;
@@ -182,8 +181,7 @@ fn real_main() -> i32 {
 		}
 	}
 
-	let api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>) =
-		Box::leak(Box::new(oneshot::channel::<()>()));
+	let api_chan = tokio::sync::mpsc::channel::<()>(1);
 
 	let (logs_tx, logs_rx) = if logging_config.tui_running.unwrap() {
 		let (logs_tx, logs_rx) = mpsc::sync_channel::<LogEntry>(200);

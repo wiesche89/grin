@@ -50,9 +50,8 @@ use crate::p2p::types::{Capabilities, PeerAddr};
 use crate::pool;
 use crate::util::file::get_first_line;
 use crate::util::{RwLock, StopState};
-use futures::channel::oneshot;
 
-/// Arcified  thread-safe TransactionPool with type parameters used by server components
+/// Thread-safe TransactionPool with type parameters used by server components
 pub type ServerTxPool = Arc<RwLock<pool::TransactionPool<PoolToChainAdapter, PoolToNetAdapter>>>;
 
 /// Grin server holding internal structures.
@@ -85,7 +84,10 @@ impl Server {
 		config: ServerConfig,
 		stop_state: Option<Arc<StopState>>,
 		server_tx: Option<mpsc::Sender<ServerInitStatus>>,
-		api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
+		api_chan: (
+			tokio::sync::mpsc::Sender<()>,
+			tokio::sync::mpsc::Receiver<()>,
+		),
 	) -> Result<Server, Error> {
 		let mining_config = config.stratum_mining_config.clone();
 		let enable_test_miner = config.run_test_miner;
@@ -144,17 +146,17 @@ impl Server {
 		config: ServerConfig,
 		stop_state: Option<Arc<StopState>>,
 		server_tx: Option<mpsc::Sender<ServerInitStatus>>,
-		api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
+		api_chan: (
+			tokio::sync::mpsc::Sender<()>,
+			tokio::sync::mpsc::Receiver<()>,
+		),
 	) -> Result<Server, Error> {
 		// Obtain our lock_file or fail immediately with an error.
 		let lock_file = Server::one_grin_at_a_time(&config)?;
 
 		// Defaults to None (optional) in config file.
 		// This translates to false here.
-		let archive_mode = match config.archive_mode {
-			None => false,
-			Some(b) => b,
-		};
+		let archive_mode = config.archive_mode.unwrap_or_else(|| false);
 
 		let stop_state = if stop_state.is_some() {
 			stop_state.unwrap()
@@ -190,7 +192,7 @@ impl Server {
 			let _ = server_tx.send(ServerInitStatus::LoadDatabase);
 		}
 
-		let (db_migration_prog_tx, db_migration_prog_rx) = mpsc::channel::<i8>();
+		let (db_migration_prog_tx, db_migration_prog_rx) = std::sync::mpsc::channel::<i8>();
 		if let Some(ref server_tx) = server_tx {
 			let server_tx = server_tx.clone();
 			thread::spawn(move || loop {
@@ -226,7 +228,7 @@ impl Server {
 		));
 
 		// Initialize our capabilities.
-		// Currently either "default" or with optional "archive_mode" (block history) support enabled.
+		// Currently, either "default" or with optional "archive_mode" (block history) support enabled.
 		let capabilities = if let Some(true) = config.archive_mode {
 			Capabilities::default() | Capabilities::BLOCK_HIST
 		} else {
@@ -396,10 +398,9 @@ impl Server {
 	) {
 		info!("start_test_miner - start",);
 		let sync_state = self.sync_state.clone();
-		let config_wallet_url = match wallet_listener_url.clone() {
-			Some(u) => u,
-			None => String::from("http://127.0.0.1:13415"),
-		};
+		let config_wallet_url = wallet_listener_url
+			.clone()
+			.unwrap_or_else(|| String::from("http://127.0.0.1:13415"));
 
 		let config = StratumServerConfig {
 			attempt_time_per_block: 60,
@@ -543,13 +544,13 @@ impl Server {
 		Ok(ServerStats {
 			peer_count: self.peer_count(),
 			chain_stats: head_stats,
-			header_stats: header_stats,
+			header_stats,
 			sync_status: self.sync_state.status(),
-			disk_usage_gb: disk_usage_gb,
-			stratum_stats: stratum_stats,
-			peer_stats: peer_stats,
-			diff_stats: diff_stats,
-			tx_stats: tx_stats,
+			disk_usage_gb,
+			stratum_stats,
+			peer_stats,
+			diff_stats,
+			tx_stats,
 		})
 	}
 

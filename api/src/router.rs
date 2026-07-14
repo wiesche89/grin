@@ -301,9 +301,9 @@ mod tests {
 
 	use super::*;
 	use crate::{client, ApiServer};
-	use futures::channel::oneshot;
 	use http_body_util::Full;
 	use std::net::{SocketAddr, TcpListener};
+	use tokio::sync::mpsc;
 
 	struct HandlerImpl(u16);
 
@@ -370,8 +370,7 @@ mod tests {
 		let server_port = open_port();
 		let server_addr = format!("127.0.0.1:{}", server_port);
 		let addr: SocketAddr = server_addr.parse().expect("unable to parse server address");
-		let api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>) =
-			Box::leak(Box::new(oneshot::channel::<()>()));
+		let api_chan = mpsc::channel::<()>(1);
 		server.start(addr, routes.clone(), None, api_chan).unwrap();
 
 		let call_handler = |url| {
@@ -388,6 +387,6 @@ mod tests {
 		assert_eq!(call_handler("/v1/zzz/1"), 104);
 		assert_eq!(call_handler("/v1/zzz/2"), 104);
 		assert_eq!(call_handler("/v1/zzz/2/zzz"), 105);
-		server.stop();
+		let _ = server.stop();
 	}
 }

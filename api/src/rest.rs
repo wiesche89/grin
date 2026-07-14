@@ -20,7 +20,6 @@
 
 use crate::router::{Handler, HandlerObj, ResponseFuture, Router, RouterError};
 use crate::web::response;
-use futures::channel::oneshot;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::{Request, StatusCode};
@@ -34,6 +33,7 @@ use std::sync::Arc;
 use std::{io, thread};
 use tokio::net::TcpListener;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout, Duration};
 use tokio_rustls::TlsAcceptor;
 
@@ -123,7 +123,7 @@ impl TLSConfig {
 
 /// HTTP server allowing the registration of ApiEndpoint implementations.
 pub struct ApiServer {
-	shutdown_sender: Option<oneshot::Sender<()>>,
+	shutdown_sender: Option<mpsc::Sender<()>>,
 }
 
 impl ApiServer {
@@ -141,77 +141,31 @@ impl ApiServer {
 		addr: SocketAddr,
 		router: Router,
 		conf: Option<TLSConfig>,
-		api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
+		api_chan: (mpsc::Sender<()>, mpsc::Receiver<()>),
 	) -> Result<thread::JoinHandle<()>, Error> {
-		match conf {
-			Some(conf) => self.start_tls(addr, router, conf, api_chan),
-			None => self.start_no_tls(addr, router, api_chan),
-		}
-	}
+		let _ = rustls::crypto::ring::default_provider().install_default();
 
-	/// Starts the ApiServer at the provided address.
-	fn start_no_tls(
-		&mut self,
-		addr: SocketAddr,
-		router: Router,
-		api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
-	) -> Result<thread::JoinHandle<()>, Error> {
 		if self.shutdown_sender.is_some() {
 			return Err(Error::Internal(
-				"Can't start HTTP API server, it's running already".to_string(),
+				"Can't start API server, it's running already".to_string(),
 			));
 		}
-		let rx = &mut api_chan.1;
-		let tx = &mut api_chan.0;
+		self.shutdown_sender = Some(api_chan.0);
 
-		// Jones's trick to update memory
-		let m = oneshot::channel::<()>();
-		let tx = std::mem::replace(tx, m.0);
-		self.shutdown_sender = Some(tx);
-
+		let tls = match conf {
+			Some(conf) => Some(TlsAcceptor::from(conf.build_server_config()?)),
+			None => None,
+		};
 		thread::Builder::new()
 			.name("apis".to_string())
-			.spawn(move || start_server(addr, router, rx, None))
-			.map_err(|_| Error::Internal("failed to spawn API thread".to_string()))
-	}
-
-	/// Starts the TLS ApiServer at the provided address.
-	fn start_tls(
-		&mut self,
-		addr: SocketAddr,
-		router: Router,
-		conf: TLSConfig,
-		api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
-	) -> Result<thread::JoinHandle<()>, Error> {
-		if self.shutdown_sender.is_some() {
-			return Err(Error::Internal(
-				"Can't start HTTPS API server, it's running already".to_string(),
-			));
-		}
-
-		let rx = &mut api_chan.1;
-		let tx = &mut api_chan.0;
-
-		// Jones's trick to update memory
-		let m = oneshot::channel::<()>();
-		let tx = std::mem::replace(tx, m.0);
-		self.shutdown_sender = Some(tx);
-
-		let tls_acceptor = TlsAcceptor::from(conf.build_server_config()?);
-
-		thread::Builder::new()
-			.name("apis".to_string())
-			.spawn(move || start_server(addr, router, rx, Some(tls_acceptor)))
+			.spawn(move || start_server(addr, router, api_chan.1, tls))
 			.map_err(|_| Error::Internal("failed to spawn API thread".to_string()))
 	}
 
 	/// Stops the API server.
 	pub fn stop(&mut self) -> bool {
-		if self.shutdown_sender.is_some() {
-			let tx = self.shutdown_sender.as_mut().unwrap();
-			let m = oneshot::channel::<()>();
-			let tx = std::mem::replace(tx, m.0);
-			match tx.send(()) {
+		if let Some(tx) = self.shutdown_sender.take() {
+			match tx.try_send(()) {
 				Ok(_) => {
 					info!("API server has been stopped");
 					true
@@ -222,7 +176,7 @@ impl ApiServer {
 				}
 			}
 		} else {
-			error!("Can't stop API server, it's not running or doesn't support stop operation");
+			error!("Can't stop API server, it's not running or already stopped");
 			false
 		}
 	}
@@ -232,7 +186,7 @@ impl ApiServer {
 fn start_server(
 	addr: SocketAddr,
 	router: Router,
-	rx: &mut oneshot::Receiver<()>,
+	rx: mpsc::Receiver<()>,
 	tls: Option<TlsAcceptor>,
 ) {
 	let server = async move {
@@ -322,8 +276,8 @@ fn start_server(
 }
 
 /// Signal for graceful API server shutdown.
-async fn shutdown_signal(rx: &mut oneshot::Receiver<()>) {
-	rx.await.ok();
+async fn shutdown_signal(mut rx: mpsc::Receiver<()>) {
+	let _ = rx.recv().await;
 }
 
 pub struct LoggingMiddleware {}

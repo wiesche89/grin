@@ -1,14 +1,28 @@
+// Copyright 2026 The Grin Developers
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use grin_api as api;
 use grin_util as util;
 
 use crate::api::*;
-use futures::channel::oneshot;
 use hyper::body::Incoming;
 use hyper::{Request, StatusCode};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::{thread, time};
+use tokio::sync::mpsc;
 
 struct IndexHandler {
 	list: Vec<String>,
@@ -83,8 +97,7 @@ fn test_start_api() {
 	let server_port = open_port(server_host);
 	let server_addr = format!("{}:{}", server_host, server_port);
 	let addr: SocketAddr = server_addr.parse().expect("unable to parse server address");
-	let api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>) =
-		Box::leak(Box::new(oneshot::channel::<()>()));
+	let api_chan = mpsc::channel::<()>(1);
 	assert!(server.start(addr, router, None, api_chan).is_ok());
 	let url = format!("http://{}/v1/", server_addr);
 	let index = request_with_retry(url.as_str()).unwrap();
@@ -112,12 +125,11 @@ fn test_start_api_tls() {
 	let server_port = open_port(server_host);
 	let server_addr = format!("{}:{}", server_host, server_port);
 	let addr: SocketAddr = server_addr.parse().expect("unable to parse server address");
-	let api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>) =
-		Box::leak(Box::new(oneshot::channel::<()>()));
+	let api_chan = mpsc::channel::<()>(1);
 	assert!(server.start(addr, router, Some(tls_conf), api_chan).is_ok());
 	let index = request_with_retry("https://yourdomain.com:14444/v1/").unwrap();
 	assert_eq!(index.len(), 2);
-	assert!(!server.stop());
+	assert!(server.stop())
 }
 
 fn request_with_retry(url: &str) -> Result<Vec<String>, Error> {

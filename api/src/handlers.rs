@@ -40,7 +40,6 @@ use crate::util::StopState;
 use crate::web::*;
 use crate::{p2p, ApiBody};
 use easy_jsonrpc_mw::{Handler, MaybeReply};
-use futures::channel::oneshot;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
@@ -48,6 +47,7 @@ use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::thread;
+use tokio::sync::mpsc;
 
 /// Listener version, providing same API but listening for requests on a
 /// port and wrapping the calls
@@ -60,7 +60,7 @@ pub fn node_apis<B, P>(
 	api_secret: Option<String>,
 	foreign_api_secret: Option<String>,
 	tls_config: Option<TLSConfig>,
-	api_chan: &'static mut (oneshot::Sender<()>, oneshot::Receiver<()>),
+	api_chan: (mpsc::Sender<()>, mpsc::Receiver<()>),
 	stop_state: Arc<StopState>,
 ) -> Result<(), Error>
 where
@@ -121,7 +121,7 @@ where
 			loop {
 				thread::sleep(std::time::Duration::from_millis(100));
 				if stop_state.is_stopped() {
-					apis.stop();
+					let _ = apis.stop();
 					break;
 				}
 			}
