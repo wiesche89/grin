@@ -182,7 +182,7 @@ impl TUIStatusView {
 			LinearLayout::new(Orientation::Vertical)
 				.child(
 					LinearLayout::new(Orientation::Horizontal)
-						.child(TextView::new("Runtime (s):                  "))
+						.child(TextView::new("Uptime:                       "))
 						.child(TextView::new("0").with_name("basic_runtime_seconds")),
 				)
 				.child(
@@ -298,7 +298,7 @@ impl TUIStatusListener for TUIStatusView {
 		let basic_status = TUIStatusView::update_sync_status(stats.sync_status);
 
 		c.call_on_name("basic_runtime_seconds", |t: &mut TextView| {
-			t.set_content(stats.uptime_seconds.to_string());
+			t.set_content(stats.uptime_format());
 		});
 		c.call_on_name("basic_current_status", |t: &mut TextView| {
 			t.set_content(basic_status);
