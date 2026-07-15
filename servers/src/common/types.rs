@@ -130,6 +130,49 @@ pub enum ChainValidationMode {
 	Disabled,
 }
 
+/// Experimental full-history sync pipeline configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ArchiveSyncConfig {
+	/// Enable the dedicated archive body-sync pipeline.
+	pub enabled: bool,
+	/// Maximum number of block requests tracked at once.
+	pub request_window: usize,
+	/// Maximum number of requests assigned to one peer.
+	pub peer_inflight_limit: usize,
+	/// Delay before a request may be hedged to another peer.
+	pub hedge_timeout_ms: u64,
+	/// Hard deadline after which an attempt is considered timed out.
+	pub request_timeout_ms: u64,
+	/// Maximum number of downloaded blocks waiting for validation or apply.
+	pub queue_blocks: usize,
+	/// Maximum serialized bytes retained by the pipeline.
+	pub queue_bytes: usize,
+	/// Number of intrinsic validation workers.
+	pub validation_workers: usize,
+	/// Maximum number of consecutive blocks committed together.
+	pub batch_blocks: usize,
+	/// Maximum serialized bytes committed together.
+	pub batch_bytes: usize,
+}
+
+impl Default for ArchiveSyncConfig {
+	fn default() -> Self {
+		Self {
+			enabled: false,
+			request_window: 256,
+			peer_inflight_limit: 16,
+			hedge_timeout_ms: 2_000,
+			request_timeout_ms: 10_000,
+			queue_blocks: 256,
+			queue_bytes: 64 * 1024 * 1024,
+			validation_workers: 0,
+			batch_blocks: 32,
+			batch_bytes: 16 * 1024 * 1024,
+		}
+	}
+}
+
 impl Default for ChainValidationMode {
 	fn default() -> ChainValidationMode {
 		ChainValidationMode::Disabled
@@ -171,6 +214,10 @@ pub struct ServerConfig {
 
 	/// Whether this node is a full archival node or a fast-sync, pruned node
 	pub archive_mode: Option<bool>,
+
+	/// Experimental pipelined full-history sync for archive nodes.
+	#[serde(default)]
+	pub archive_sync: ArchiveSyncConfig,
 
 	/// Whether to skip the sync timeout on startup
 	/// (To assist testing on solo chains)
@@ -225,6 +272,7 @@ impl Default for ServerConfig {
 			chain_type: ChainTypes::default(),
 			future_time_limit: default_future_time_limit(),
 			archive_mode: Some(false),
+			archive_sync: ArchiveSyncConfig::default(),
 			chain_validation_mode: ChainValidationMode::default(),
 			pool_config: pool::PoolConfig::default(),
 			skip_sync_wait: Some(false),

@@ -14,6 +14,7 @@
 
 //! Syncing of the chain with the rest of the network
 
+pub mod archive_sync;
 mod body_sync;
 mod header_sync;
 mod state_sync;

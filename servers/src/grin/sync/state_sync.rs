@@ -172,6 +172,11 @@ impl StateSync {
 				let (launch, _download_timeout) = self.state_sync_due();
 				let archive_header = { self.chain.txhashset_archive_header_header_only().unwrap() };
 				if launch {
+					if let Err(e) = self.chain.begin_pibd(&archive_header) {
+						error!("state_sync: cannot persist PIBD marker: {}", e);
+						self.sync_state.set_sync_error(e);
+						return true;
+					}
 					info!(
 						"state_sync: PIBD started for archive header {} at height {}",
 						archive_header.hash(),
@@ -222,6 +227,11 @@ impl StateSync {
 								archive_header.hash(),
 								archive_header.height
 							);
+							if let Err(e) = self.chain.finish_pibd() {
+								error!("state_sync: cannot clear completed PIBD marker: {}", e);
+								self.sync_state.set_sync_error(e);
+								return false;
+							}
 							return true;
 						}
 					};

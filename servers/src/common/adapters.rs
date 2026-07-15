@@ -43,6 +43,7 @@ use crate::core::core::{
 use crate::core::pow::Difficulty;
 use crate::core::ser::ProtocolVersion;
 use crate::core::{core, global};
+use crate::grin::sync::archive_sync::ArchiveSyncPipeline;
 use crate::p2p;
 use crate::p2p::types::{HeaderSegmentAcceptance, PeerInfo};
 use crate::pool::{self, BlockChain, PoolAdapter};
@@ -96,6 +97,7 @@ where
 	pihd_header_cache_anchor: RwLock<Option<PihdHeaderCacheAnchor>>,
 	header_segment_requests: RwLock<HashMap<SocketAddr, (DateTime<Utc>, usize)>>,
 	tx: mpsc::SyncSender<NetAdapterWorkerMessage>,
+	archive_sync: Arc<ArchiveSyncPipeline>,
 }
 
 impl<B, P> p2p::ChainAdapter for NetToChainAdapter<B, P>
@@ -165,10 +167,16 @@ where
 
 	fn block_received(
 		&self,
-		b: core::Block,
+		mut b: core::Block,
 		peer_info: &PeerInfo,
 		opts: chain::Options,
 	) -> Result<bool, chain::Error> {
+		if opts.contains(chain::Options::SYNC) {
+			match self.archive_sync.accepts(b, peer_info.addr) {
+				Ok(_) => return Ok(true),
+				Err(block) => b = block,
+			}
+		}
 		if self.chain().is_known(&b.header).is_err() {
 			return Ok(true);
 		}
@@ -779,6 +787,7 @@ where
 		tx_pool: Arc<RwLock<pool::TransactionPool<B, P>>>,
 		config: ServerConfig,
 		hooks: Vec<Box<dyn NetEvents + Send + Sync>>,
+		archive_sync: Arc<ArchiveSyncPipeline>,
 	) -> Self {
 		let (tx, rx) = mpsc::sync_channel(WORKER_CHANNEL_BUFFER_SIZE);
 		let adapter = NetToChainAdapter {
@@ -792,6 +801,7 @@ where
 			pihd_header_cache_anchor: RwLock::new(None),
 			header_segment_requests: RwLock::new(HashMap::new()),
 			tx,
+			archive_sync,
 		};
 		adapter.spawn_net_adapter_worker(Arc::downgrade(&chain), rx);
 		adapter
@@ -1340,6 +1350,7 @@ where
 	tx_pool: Arc<RwLock<pool::TransactionPool<B, P>>>,
 	peers: OneTime<Weak<p2p::Peers>>,
 	hooks: Vec<Box<dyn ChainEvents + Send + Sync>>,
+	last_sync_block: RwLock<Option<core::Block>>,
 }
 
 impl<B, P> ChainAdapter for ChainToPoolAndNetAdapter<B, P>
@@ -1372,7 +1383,9 @@ where
 		// This may be slow and we do not want to delay block propagation.
 		// We only want to reconcile the txpool against the new block *if* total work has increased.
 
-		if status.is_next() || status.is_reorg() {
+		if opts.contains(chain::Options::SYNC) && (status.is_next() || status.is_reorg()) {
+			*self.last_sync_block.write() = Some(b.clone());
+		} else if status.is_next() || status.is_reorg() {
 			let mut tx_pool = self.tx_pool.write();
 
 			let _ = tx_pool.reconcile_block(b);
@@ -1382,8 +1395,17 @@ where
 			tx_pool.truncate_reorg_cache(cutoff);
 		}
 
-		if status.is_reorg() {
+		if !opts.contains(chain::Options::SYNC) && status.is_reorg() {
 			let _ = self.tx_pool.write().reconcile_reorg_cache(&b.header);
+		}
+	}
+
+	fn sync_complete(&self) {
+		if let Some(block) = self.last_sync_block.write().take() {
+			let mut tx_pool = self.tx_pool.write();
+			let _ = tx_pool.reconcile_block(&block);
+			let cutoff = Utc::now() - Duration::minutes(tx_pool.config.reorg_cache_period as i64);
+			tx_pool.truncate_reorg_cache(cutoff);
 		}
 	}
 }
@@ -1401,7 +1423,8 @@ where
 		ChainToPoolAndNetAdapter {
 			tx_pool,
 			peers: OneTime::new(),
-			hooks: hooks,
+			hooks,
+			last_sync_block: RwLock::new(None),
 		}
 	}
 

@@ -28,6 +28,7 @@ use self::keychain::{
 	BlindSum, ExtKeychain, ExtKeychainPath, Identifier, Keychain, SwitchCommitmentType,
 };
 use self::util::RwLock;
+use self::util::ToHex;
 use chrono::Duration;
 use grin_chain as chain;
 use grin_chain::{BlockStatus, ChainAdapter, Options};
@@ -90,6 +91,125 @@ fn mine_short_chain() {
 	let chain = mine_chain(chain_dir, 4);
 	assert_eq!(chain.head().unwrap().height, 3);
 	clean_output_dir(chain_dir);
+}
+
+#[test]
+fn pibd_marker_survives_restart_and_clears_on_completion() {
+	let chain_dir = ".grin.pibd_marker";
+	clean_output_dir(chain_dir);
+	global::set_local_chain_type(ChainTypes::AutomatedTesting);
+	let genesis = pow::mine_genesis_block().unwrap();
+	let chain = init_chain(chain_dir, genesis.clone());
+	let keychain = ExtKeychain::from_random_seed(false).unwrap();
+	let target = prepare_block(&keychain, &genesis.header, &chain, 1);
+	chain
+		.process_block_header(&target.header, Options::SKIP_POW)
+		.unwrap();
+	chain.reset_pibd_head().unwrap();
+	chain.begin_pibd(&target.header).unwrap();
+	assert_eq!(
+		chain.store().pibd_in_progress().unwrap(),
+		Some(Tip::from_header(&target.header))
+	);
+	drop(chain);
+
+	let reopened = Chain::init(
+		chain_dir.to_string(),
+		Arc::new(NoopAdapter {}),
+		genesis.clone(),
+		pow::verify_size,
+		false,
+		None,
+	)
+	.unwrap();
+	assert!(reopened.store().pibd_in_progress().unwrap().is_some());
+	reopened.finish_pibd().unwrap();
+	assert!(reopened.store().pibd_in_progress().unwrap().is_none());
+	drop(reopened);
+	clean_output_dir(chain_dir);
+}
+
+#[test]
+fn validated_batch_matches_single_block_processing() {
+	let source_dir = ".grin.batch_source";
+	let batch_dir = ".grin.batch_target";
+	clean_output_dir(source_dir);
+	clean_output_dir(batch_dir);
+	global::set_local_chain_type(ChainTypes::AutomatedTesting);
+	let keychain = ExtKeychain::from_random_seed(false).unwrap();
+	let genesis = pow::mine_genesis_block().unwrap();
+	let source = init_chain(source_dir, genesis.clone());
+	let target = Chain::init_with_archive_sync(
+		batch_dir.to_string(),
+		Arc::new(NoopAdapter {}),
+		genesis.clone(),
+		pow::verify_size,
+		true,
+		true,
+		None,
+	)
+	.unwrap();
+	let mut blocks = vec![];
+	let mut previous = source.head_header().unwrap();
+	for difficulty in 1..=3 {
+		let block = prepare_block(&keychain, &previous, &source, difficulty);
+		source
+			.process_block(block.clone(), Options::SKIP_POW)
+			.unwrap();
+		target
+			.process_block_header(&block.header, Options::SKIP_POW)
+			.unwrap();
+		previous = block.header.clone();
+		blocks.push(block);
+	}
+
+	let secp = util::secp::Secp256k1::with_caps(util::secp::ContextFlag::Commit);
+	let validated = blocks
+		.into_iter()
+		.map(|block| target.validate_block_with_secp(block, &secp).unwrap())
+		.collect();
+	target
+		.process_validated_batch(validated, Options::SKIP_POW)
+		.unwrap();
+	let expected_head = source.head().unwrap();
+	assert_eq!(target.head().unwrap(), expected_head);
+	target.validate(false).unwrap();
+	drop(target);
+	let reopened = Chain::init_with_archive_sync(
+		batch_dir.to_string(),
+		Arc::new(NoopAdapter {}),
+		genesis.clone(),
+		pow::verify_size,
+		true,
+		true,
+		None,
+	)
+	.unwrap();
+	assert_eq!(reopened.head().unwrap(), expected_head);
+	reopened.validate(false).unwrap();
+	drop(reopened);
+	let selected_leaf = std::path::Path::new(batch_dir)
+		.join("txhashset/output")
+		.join(format!(
+			"pmmr_leaf.bin.generation-{}",
+			expected_head.last_block_h.to_hex()
+		));
+	std::fs::write(selected_leaf, b"damaged checkpoint").unwrap();
+	let recovered = Chain::init_with_archive_sync(
+		batch_dir.to_string(),
+		Arc::new(NoopAdapter {}),
+		genesis.clone(),
+		pow::verify_size,
+		true,
+		true,
+		None,
+	)
+	.unwrap();
+	assert_eq!(recovered.head().unwrap(), Tip::from_header(&genesis.header));
+	recovered.validate(false).unwrap();
+	drop(recovered);
+	clean_output_dir(source_dir);
+	clean_output_dir(batch_dir);
 }
 
 // Convenience wrapper for processing a full block on the test chain.

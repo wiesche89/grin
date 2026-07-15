@@ -208,16 +208,22 @@ impl Server {
 			});
 		}
 
-		let shared_chain = Arc::new(chain::Chain::init(
+		let archive_sync_enabled = config.archive_sync.enabled && archive_mode;
+		let shared_chain = Arc::new(chain::Chain::init_with_archive_sync(
 			config.db_root.clone(),
 			chain_adapter.clone(),
 			genesis.clone(),
 			pow::verify_size,
 			archive_mode,
+			archive_sync_enabled,
 			Some(db_migration_prog_tx),
 		)?);
 
 		pool_adapter.set_chain(shared_chain.clone());
+		let mut archive_sync_config = config.archive_sync.clone();
+		archive_sync_config.enabled = archive_sync_enabled;
+		let archive_sync =
+			sync::archive_sync::ArchiveSyncPipeline::new(archive_sync_config, shared_chain.clone());
 
 		let net_adapter = Arc::new(NetToChainAdapter::new(
 			sync_state.clone(),
@@ -225,6 +231,7 @@ impl Server {
 			tx_pool.clone(),
 			config.clone(),
 			init_net_hooks(&config)?,
+			archive_sync.clone(),
 		));
 
 		// Initialize our capabilities.
@@ -253,6 +260,7 @@ impl Server {
 		chain_adapter.init(p2p_server.peers.clone());
 		pool_net_adapter.init(p2p_server.peers.clone());
 		net_adapter.init(p2p_server.peers.clone());
+		archive_sync.init(p2p_server.peers.clone());
 
 		let mut connect_thread = None;
 
@@ -274,6 +282,7 @@ impl Server {
 			p2p_server.peers.clone(),
 			shared_chain.clone(),
 			stop_state.clone(),
+			archive_sync,
 		)?;
 
 		let p2p_inner = p2p_server.clone();

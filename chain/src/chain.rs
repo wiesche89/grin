@@ -30,6 +30,7 @@ use crate::txhashset;
 use crate::txhashset::{Desegmenter, PMMRHandle, Segmenter, TxHashSet};
 use crate::types::{
 	BlockStatus, ChainAdapter, CommitPos, NoStatus, Options, Tip, TxHashsetWriteStatus,
+	ValidatedBlock,
 };
 use crate::util::secp::pedersen::{Commitment, RangeProof};
 use crate::util::RwLock;
@@ -158,6 +159,7 @@ pub struct Chain {
 	pow_verifier: fn(&BlockHeader) -> Result<(), pow::Error>,
 	denylist: Arc<RwLock<Vec<Hash>>>,
 	archive_mode: bool,
+	archive_sync: bool,
 	genesis: Block,
 }
 
@@ -173,7 +175,33 @@ impl Chain {
 		archive_mode: bool,
 		db_migration_prog_tx: Option<mpsc::Sender<i8>>,
 	) -> Result<Chain, Error> {
+		Self::init_with_archive_sync(
+			db_root,
+			adapter,
+			genesis,
+			pow_verifier,
+			archive_mode,
+			false,
+			db_migration_prog_tx,
+		)
+	}
+
+	/// Initialize a chain with the experimental archive sync recovery protocol.
+	pub fn init_with_archive_sync(
+		db_root: String,
+		adapter: Arc<dyn ChainAdapter + Send + Sync>,
+		genesis: Block,
+		pow_verifier: fn(&BlockHeader) -> Result<(), pow::Error>,
+		archive_mode: bool,
+		archive_sync: bool,
+		db_migration_prog_tx: Option<mpsc::Sender<i8>>,
+	) -> Result<Chain, Error> {
 		let store = Arc::new(store::ChainStore::new(&db_root, db_migration_prog_tx)?);
+		let import_legacy_sidecars = if archive_mode && archive_sync {
+			crate::sidecar::recover(&db_root, &store).map_err(Error::Other)?
+		} else {
+			false
+		};
 
 		// open the txhashset, creating a new one if necessary
 		let mut txhashset = txhashset::TxHashSet::open(db_root.clone(), store.clone(), None)?;
@@ -186,6 +214,22 @@ impl Chain {
 		)?;
 
 		setup_head(&genesis, &store, &mut header_pmmr, &mut txhashset, false)?;
+		if archive_mode
+			&& archive_sync
+			&& (import_legacy_sidecars || store.sidecar_manifest()?.is_none())
+		{
+			let tip = store.head()?;
+			let header = store.get_block_header(&tip.last_block_h)?;
+			let previous = store.sidecar_manifest()?;
+			let manifest = crate::sidecar::checkpoint(&db_root, &header, previous.as_ref())
+				.map_err(|error| Error::Other(error.to_string()))?;
+			let mut batch = store.batch()?;
+			batch.save_sidecar_manifest(&manifest)?;
+			batch.commit()?;
+		}
+		if let Some(manifest) = store.sidecar_manifest()? {
+			crate::sidecar::cleanup(&db_root, &manifest);
+		}
 
 		// Initialize the output_pos index based on UTXO set
 		// and NRD kernel_pos index based recent kernel history.
@@ -208,7 +252,8 @@ impl Chain {
 			pow_verifier,
 			denylist: Arc::new(RwLock::new(vec![])),
 			archive_mode,
-			genesis: genesis,
+			archive_sync,
+			genesis,
 		};
 
 		chain.log_heads()?;
@@ -317,12 +362,48 @@ impl Chain {
 	pub fn reset_pibd_head(&self) -> Result<(), Error> {
 		let mut batch = self.store.batch()?;
 		batch.save_pibd_head(&self.genesis().into())?;
+		batch.commit()?;
+		Ok(())
+	}
+
+	/// Persist the target before PIBD starts changing PMMR files.
+	pub fn begin_pibd(&self, header: &BlockHeader) -> Result<(), Error> {
+		let mut batch = self.store.batch()?;
+		batch.save_pibd_in_progress(&Tip::from_header(header))?;
+		batch.commit()?;
+		Ok(())
+	}
+
+	/// Clear the PIBD marker after final state validation succeeds.
+	pub fn finish_pibd(&self) -> Result<(), Error> {
+		let target = self
+			.store
+			.pibd_in_progress()?
+			.ok_or_else(|| Error::Other("PIBD completion marker is missing".into()))?;
+		let header = self.get_block_header(&target.last_block_h)?;
+		let _txhashset = self.txhashset.read();
+		let mut batch = self.store.batch()?;
+		if self.archive_sync {
+			let previous = self.store.sidecar_manifest()?;
+			let manifest = crate::sidecar::checkpoint(&self.db_root, &header, previous.as_ref())
+				.map_err(|error| Error::Other(error.to_string()))?;
+			batch.save_sidecar_manifest(&manifest)?;
+		}
+		batch.clear_pibd_in_progress()?;
+		batch.commit()?;
+		drop(_txhashset);
+		self.cleanup_sidecars();
 		Ok(())
 	}
 
 	/// Are we running with archive_mode enabled?
 	pub fn archive_mode(&self) -> bool {
 		self.archive_mode
+	}
+
+	/// Notify downstream consumers after the initial sync path has caught up.
+	pub fn sync_complete(&self) {
+		self.adapter.sync_complete();
 	}
 
 	/// Return our shared header MMR handle.
@@ -345,6 +426,12 @@ impl Chain {
 		self.store.clone()
 	}
 
+	fn cleanup_sidecars(&self) {
+		if let Ok(Some(manifest)) = self.store.sidecar_manifest() {
+			crate::sidecar::cleanup(&self.db_root, &manifest);
+		}
+	}
+
 	fn log_heads(&self) -> Result<(), Error> {
 		let log_head = |name, head: Tip| {
 			debug!(
@@ -364,11 +451,172 @@ impl Chain {
 	/// those as well if they're found
 	pub fn process_block(&self, b: Block, opts: Options) -> Result<Option<Tip>, Error> {
 		let height = b.header.height;
-		let res = self.process_block_single(b, opts);
+		let res = self.process_block_single(b, opts, None);
 		if res.is_ok() {
 			self.check_orphans(height + 1);
 		}
 		res
+	}
+
+	/// Perform all checks that only depend on the block and its preceding header.
+	/// The returned value is the only way to enter the prevalidated state update path.
+	pub fn validate_block(&self, block: Block) -> Result<ValidatedBlock, Error> {
+		let prev = self.get_previous_header(&block.header)?;
+		block.validate(&prev.total_kernel_offset)?;
+		Ok(Self::validated_block(
+			block,
+			&prev,
+			self.header_head()?.last_block_h,
+		))
+	}
+
+	/// Perform context-free checks using a caller-owned secp context.
+	pub fn validate_block_with_secp(
+		&self,
+		block: Block,
+		secp: &crate::util::secp::Secp256k1,
+	) -> Result<ValidatedBlock, Error> {
+		let prev = self.get_previous_header(&block.header)?;
+		block.validate_with_secp(&prev.total_kernel_offset, secp)?;
+		Ok(Self::validated_block(
+			block,
+			&prev,
+			self.header_head()?.last_block_h,
+		))
+	}
+
+	fn validated_block(block: Block, prev: &BlockHeader, header_head: Hash) -> ValidatedBlock {
+		ValidatedBlock {
+			hash: block.hash(),
+			prev_hash: prev.hash(),
+			version: block.header.version,
+			header_head,
+			block,
+		}
+	}
+
+	/// Process a block previously returned by [`Chain::validate_block`].
+	pub fn process_validated_block(
+		&self,
+		block: ValidatedBlock,
+		opts: Options,
+	) -> Result<Option<Tip>, Error> {
+		let height = block.height();
+		let stamp = (
+			block.hash,
+			block.prev_hash,
+			block.version,
+			block.header_head,
+		);
+		let res = self.process_block_single(block.block, opts, Some(stamp));
+		if res.is_ok() {
+			self.check_orphans(height + 1);
+		}
+		res
+	}
+
+	/// Atomically apply contiguous, prevalidated blocks from the canonical header chain.
+	pub fn process_validated_batch(
+		&self,
+		validated: Vec<ValidatedBlock>,
+		opts: Options,
+	) -> Result<Option<Tip>, Error> {
+		if validated.is_empty() {
+			return Ok(None);
+		}
+		let current_head = self.head()?;
+		let canonical_epoch = self.header_head()?.last_block_h;
+		let mut expected_prev = current_head.last_block_h;
+		let mut expected_height = current_head.height + 1;
+		for item in &validated {
+			if item.hash != item.block.hash()
+				|| item.prev_hash != item.block.header.prev_hash
+				|| item.version != item.block.header.version
+				|| item.header_head != canonical_epoch
+				|| item.prev_hash != expected_prev
+				|| item.height() != expected_height
+			{
+				return Err(Error::StaleValidatedBlock);
+			}
+			let canonical = self.get_header_by_height(item.height())?;
+			if canonical.hash() != item.hash {
+				return Err(Error::StaleValidatedBlock);
+			}
+			self.is_known(&item.block.header)?;
+			expected_prev = item.hash;
+			expected_height += 1;
+		}
+
+		let blocks: Vec<_> = validated.into_iter().map(|item| item.block).collect();
+		let inputs = blocks
+			.iter()
+			.map(|block| block.inputs().len())
+			.sum::<usize>();
+		let outputs = blocks
+			.iter()
+			.map(|block| block.outputs().len())
+			.sum::<usize>();
+		let kernels = blocks
+			.iter()
+			.map(|block| block.kernels().len())
+			.sum::<usize>();
+		let lock_started = Instant::now();
+		let (tip, fork_point, prev_head) = {
+			let mut header_pmmr = self.header_pmmr.write();
+			let mut txhashset = self.txhashset.write();
+			let lock_wait = lock_started.elapsed();
+			let batch = self.store.batch()?;
+			let prev_head = batch.head()?;
+			if prev_head != current_head || batch.header_head()?.last_block_h != canonical_epoch {
+				return Err(Error::StaleValidatedBlock);
+			}
+			let mut ctx = self.new_ctx(opts, batch, &mut header_pmmr, &mut txhashset)?;
+			let apply_started = Instant::now();
+			let (tip, fork_point) = pipe::process_validated_batch(&blocks, &mut ctx)?;
+			let apply_time = apply_started.elapsed();
+			let checkpoint_started = Instant::now();
+			if self.archive_sync {
+				let previous = self.store.sidecar_manifest()?;
+				let manifest = crate::sidecar::checkpoint(
+					&self.db_root,
+					&blocks.last().expect("non-empty batch").header,
+					previous.as_ref(),
+				)
+				.map_err(|error| Error::Other(error.to_string()))?;
+				ctx.batch.save_sidecar_manifest(&manifest)?;
+			}
+			let checkpoint_time = checkpoint_started.elapsed();
+			let commit_started = Instant::now();
+			ctx.batch.commit()?;
+			debug!(
+				"archive batch metrics: blocks={}, inputs={}, outputs={}, kernels={}, lock_wait_ms={}, apply_ms={}, checkpoint_ms={}, commit_ms={}",
+				blocks.len(),
+				inputs,
+				outputs,
+				kernels,
+				lock_wait.as_millis(),
+				apply_time.as_millis(),
+				checkpoint_time.as_millis(),
+				commit_started.elapsed().as_millis(),
+			);
+			(tip, fork_point, prev_head)
+		};
+		self.cleanup_sidecars();
+
+		let mut prev = prev_head;
+		for block in &blocks {
+			self.adapter
+				.block_accepted(block, BlockStatus::Next { prev }, opts);
+			prev = Tip::from_header(&block.header);
+		}
+		debug!(
+			"applied archive block batch {}-{} from fork point {}",
+			blocks.first().expect("non-empty batch").header.height,
+			blocks.last().expect("non-empty batch").header.height,
+			fork_point.height
+		);
+		self.check_orphans(tip.height + 1);
+		Ok(Some(tip))
 	}
 
 	fn determine_status(
@@ -450,7 +698,12 @@ impl Chain {
 	/// Attempt to add a new block to the chain.
 	/// Returns true if it has been added to the longest chain
 	/// or false if it has added to a fork (or orphan?).
-	fn process_block_single(&self, b: Block, opts: Options) -> Result<Option<Tip>, Error> {
+	fn process_block_single(
+		&self,
+		b: Block,
+		opts: Options,
+		validated: Option<(Hash, Hash, crate::core::core::HeaderVersion, Hash)>,
+	) -> Result<Option<Tip>, Error> {
 		// Process the header first.
 		// If invalid then fail early.
 		// If valid then continue with block processing with header_head committed to db etc.
@@ -463,22 +716,58 @@ impl Chain {
 		// Only do this once we know the header PoW is valid.
 		self.check_orphan(&b, opts)?;
 
+		let mut validated = match validated {
+			Some((hash, prev_hash, version, header_head))
+				if hash == b.hash()
+					&& prev_hash == b.header.prev_hash
+					&& version == b.header.version
+					&& header_head == self.header_head()?.last_block_h =>
+			{
+				ValidatedBlock {
+					hash,
+					prev_hash,
+					version,
+					header_head,
+					block: b,
+				}
+			}
+			Some(_) => self.validate_block(b)?,
+			None => self.validate_block(b)?,
+		};
+
 		let (head, fork_point, prev_head) = {
 			let mut header_pmmr = self.header_pmmr.write();
 			let mut txhashset = self.txhashset.write();
 			let batch = self.store.batch()?;
 			let prev_head = batch.head()?;
+			let current_header_head = batch.header_head()?.last_block_h;
+			if validated.header_head != current_header_head {
+				let prev = batch.get_previous_header(&validated.block.header)?;
+				validated.block.validate(&prev.total_kernel_offset)?;
+				validated = Self::validated_block(validated.block, &prev, current_header_head);
+			}
 			let mut ctx = self.new_ctx(opts, batch, &mut header_pmmr, &mut txhashset)?;
 
-			let (head, fork_point) = pipe::process_block(&b, &mut ctx)?;
+			let (head, fork_point) = pipe::process_validated_block(&validated.block, &mut ctx)?;
+			if self.archive_sync && opts.contains(Options::SYNC) {
+				let previous = self.store.sidecar_manifest()?;
+				let manifest = crate::sidecar::checkpoint(
+					&self.db_root,
+					&validated.block.header,
+					previous.as_ref(),
+				)
+				.map_err(|error| Error::Other(error.to_string()))?;
+				ctx.batch.save_sidecar_manifest(&manifest)?;
+			}
 
 			ctx.batch.commit()?;
 
 			// release the lock and let the batch go before post-processing
 			(head, fork_point, prev_head)
 		};
+		self.cleanup_sidecars();
 
-		let prev = self.get_previous_header(&b.header)?;
+		let prev = self.get_previous_header(&validated.block.header)?;
 		let status = self.determine_status(
 			head,
 			Tip::from_header(&prev),
@@ -487,7 +776,7 @@ impl Chain {
 		);
 
 		// notifying other parts of the system of the update
-		self.adapter.block_accepted(&b, status, opts);
+		self.adapter.block_accepted(&validated.block, status, opts);
 
 		Ok(head)
 	}
@@ -587,7 +876,7 @@ impl Chain {
 						},
 					);
 					let height = orphan.block.header.height;
-					let res = self.process_block_single(orphan.block, orphan.opts);
+					let res = self.process_block_single(orphan.block, orphan.opts, None);
 					if res.is_ok() {
 						orphan_accepted = true;
 						height_accepted = height;
@@ -1247,6 +1536,11 @@ impl Chain {
 		}
 
 		debug!("txhashset_write: replaced our txhashset with the new one");
+		if self.store.pibd_in_progress()?.is_some() {
+			let mut batch = self.store.batch()?;
+			batch.clear_pibd_in_progress()?;
+			batch.commit()?;
+		}
 
 		status.on_done();
 
@@ -1737,19 +2031,47 @@ fn setup_head(
 				let mut pibd_in_progress = false;
 				let header = {
 					let head = batch.get_block_header(&head.last_block_h)?;
-					let pibd_tip = store.pibd_head()?;
-					let pibd_head = batch.get_block_header(&pibd_tip.last_block_h)?;
-					let pibd_mmr_in_progress = !resetting_pibd
-						&& pibd_head.height >= head.height
-						&& (txhashset.output_mmr_size() > head.output_mmr_size
-							|| txhashset.rangeproof_mmr_size() > head.output_mmr_size
-							|| txhashset.kernel_mmr_size() > head.kernel_mmr_size);
-					if pibd_head.height > head.height && !resetting_pibd {
+					let pibd_tip = if store.has_pibd_head()? {
+						Some(store.pibd_head()?)
+					} else {
+						None
+					};
+					let pibd_head = pibd_tip
+						.as_ref()
+						.and_then(|tip| batch.get_block_header(&tip.last_block_h).ok());
+					let oversized_sidecars = !resetting_pibd
+						&& pibd_head.as_ref().is_some_and(|pibd_head| {
+							pibd_head.height >= head.height
+								&& (txhashset.output_mmr_size() > head.output_mmr_size
+									|| txhashset.rangeproof_mmr_size() > head.output_mmr_size
+									|| txhashset.kernel_mmr_size() > head.kernel_mmr_size)
+						});
+					let stored_marker = if resetting_pibd {
+						None
+					} else {
+						store.pibd_in_progress()?
+					};
+					let marker = stored_marker.clone().filter(|target| {
+						batch.get_block_header(&target.last_block_h).is_ok()
+							&& (target.last_block_h != head.hash() || oversized_sidecars)
+							&& pibd_tip.as_ref().is_some_and(|progress| {
+								progress.height < target.height
+									|| (progress.height == target.height
+										&& progress.last_block_h == target.last_block_h)
+							})
+					});
+					if stored_marker.is_some() && marker.is_none() {
+						batch.clear_pibd_in_progress()?;
+					}
+					if let Some(target) = marker {
 						pibd_in_progress = true;
-						pibd_head
-					} else if pibd_mmr_in_progress {
+						batch.get_block_header(&target.last_block_h)?
+					} else if pibd_head.is_some() && oversized_sidecars {
+						// One-time migration for databases written before the explicit marker.
 						pibd_in_progress = true;
-						head
+						let pibd_tip = pibd_tip.expect("PIBD head checked above");
+						batch.save_pibd_in_progress(&pibd_tip)?;
+						pibd_head.expect("PIBD header checked above")
 					} else {
 						head
 					}

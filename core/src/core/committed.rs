@@ -53,6 +53,22 @@ impl From<keychain::Error> for Error {
 /// Handles the collection of the commitments as well as their
 /// summing, taking potential explicit overages of fees into account.
 pub trait Committed {
+	/// Gather and sum kernel excesses with a caller-owned secp context.
+	fn sum_kernel_excesses_with_secp(
+		&self,
+		offset: &BlindingFactor,
+		secp: &secp::Secp256k1,
+	) -> Result<(Commitment, Commitment), Error> {
+		let kernel_sum = sum_commits_with_secp(self.kernels_committed(), vec![], secp)?;
+		let mut commits = vec![kernel_sum];
+		if *offset != BlindingFactor::zero() {
+			let key = offset.secret_key(secp)?;
+			commits.push(secp.commit(0, key)?);
+		}
+		let kernel_sum_plus_offset = secp.commit_sum(commits, vec![])?;
+		Ok((kernel_sum, kernel_sum_plus_offset))
+	}
+
 	/// Gather the kernel excesses and sum them.
 	fn sum_kernel_excesses(
 		&self,
@@ -106,6 +122,26 @@ pub trait Committed {
 		sum_commits(output_commits, input_commits)
 	}
 
+	/// Gather and sum commitments with a caller-owned secp context.
+	fn sum_commitments_with_secp(
+		&self,
+		overage: i64,
+		secp: &secp::Secp256k1,
+	) -> Result<Commitment, Error> {
+		let mut input_commits = self.inputs_committed();
+		let mut output_commits = self.outputs_committed();
+		if overage != 0 {
+			let value = overage.checked_abs().ok_or(Error::InvalidValue)? as u64;
+			let over_commit = secp.commit_value(value)?;
+			if overage < 0 {
+				input_commits.push(over_commit);
+			} else {
+				output_commits.push(over_commit);
+			}
+		}
+		sum_commits_with_secp(output_commits, input_commits, secp)
+	}
+
 	/// Vector of input commitments to verify.
 	fn inputs_committed(&self) -> Vec<Commitment>;
 
@@ -135,6 +171,22 @@ pub trait Committed {
 
 		Ok((utxo_sum, kernel_sum))
 	}
+
+	/// Verify kernel sums with a caller-owned secp context.
+	fn verify_kernel_sums_with_secp(
+		&self,
+		overage: i64,
+		kernel_offset: BlindingFactor,
+		secp: &secp::Secp256k1,
+	) -> Result<(Commitment, Commitment), Error> {
+		let utxo_sum = self.sum_commitments_with_secp(overage, secp)?;
+		let (kernel_sum, kernel_sum_plus_offset) =
+			self.sum_kernel_excesses_with_secp(&kernel_offset, secp)?;
+		if utxo_sum != kernel_sum_plus_offset {
+			return Err(Error::KernelSumMismatch);
+		}
+		Ok((utxo_sum, kernel_sum))
+	}
 }
 
 /// Utility to sum positive and negative commitments, eliminating zero values
@@ -147,6 +199,18 @@ pub fn sum_commits(
 	negative.retain(|x| *x != zero_commit);
 	let secp = static_secp_instance();
 	let secp = secp.lock();
+	Ok(secp.commit_sum(positive, negative)?)
+}
+
+/// Sum commitments with a caller-owned secp context.
+pub fn sum_commits_with_secp(
+	mut positive: Vec<Commitment>,
+	mut negative: Vec<Commitment>,
+	secp: &secp::Secp256k1,
+) -> Result<Commitment, Error> {
+	let zero_commit = secp.commit_value(0)?;
+	positive.retain(|commit| *commit != zero_commit);
+	negative.retain(|commit| *commit != zero_commit);
 	Ok(secp.commit_sum(positive, negative)?)
 }
 
@@ -167,6 +231,23 @@ pub fn sum_kernel_offsets(
 	} else {
 		let sum = secp.blind_sum(positive, negative)?;
 		Ok(BlindingFactor::from_secret_key(sum))
+	}
+}
+
+/// Sum kernel offsets with a caller-owned secp context.
+pub fn sum_kernel_offsets_with_secp(
+	positive: Vec<BlindingFactor>,
+	negative: Vec<BlindingFactor>,
+	secp: &secp::Secp256k1,
+) -> Result<BlindingFactor, Error> {
+	let positive = to_secrets(positive, secp);
+	let negative = to_secrets(negative, secp);
+	if positive.is_empty() {
+		Ok(BlindingFactor::zero())
+	} else {
+		Ok(BlindingFactor::from_secret_key(
+			secp.blind_sum(positive, negative)?,
+		))
 	}
 }
 

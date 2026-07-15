@@ -134,6 +134,15 @@ fn comments() -> HashMap<String, String> {
 	);
 
 	retval.insert(
+		"archive_sync".to_string(),
+		"
+#experimental pipelined full-history sync settings for archive nodes
+#disabled by default; requires archive_mode = true
+"
+		.to_string(),
+	);
+
+	retval.insert(
 		"skip_sync_wait".to_string(),
 		"
 #skip waiting for sync on startup, (optional param, mostly for testing)

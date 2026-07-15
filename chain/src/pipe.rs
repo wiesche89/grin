@@ -82,6 +82,71 @@ pub fn process_block(
 	b: &Block,
 	ctx: &mut BlockContext<'_>,
 ) -> Result<(Option<Tip>, BlockHeader), Error> {
+	process_block_inner(b, ctx, false)
+}
+
+/// Runs the stateful block pipeline for a block already checked by `Chain`.
+pub(crate) fn process_validated_block(
+	b: &Block,
+	ctx: &mut BlockContext<'_>,
+) -> Result<(Option<Tip>, BlockHeader), Error> {
+	process_block_inner(b, ctx, true)
+}
+
+/// Apply a contiguous run of prevalidated canonical blocks in one txhashset extension.
+pub(crate) fn process_validated_batch(
+	blocks: &[Block],
+	ctx: &mut BlockContext<'_>,
+) -> Result<(Tip, BlockHeader), Error> {
+	let first = blocks
+		.first()
+		.ok_or_else(|| Error::Other("empty block batch".into()))?;
+	let current_head = ctx.batch.head()?;
+	if first.header.prev_hash != current_head.last_block_h {
+		return Err(Error::Other(
+			"block batch does not extend the current head".into(),
+		));
+	}
+	for pair in blocks.windows(2) {
+		if pair[1].header.prev_hash != pair[0].hash()
+			|| pair[1].header.height != pair[0].header.height + 1
+		{
+			return Err(Error::Other("non-contiguous block batch".into()));
+		}
+	}
+
+	let prev = prev_header_store(&first.header, &mut ctx.batch)?;
+	let header_pmmr = &mut ctx.header_pmmr;
+	let txhashset = &mut ctx.txhashset;
+	let batch = &mut ctx.batch;
+	let header_allowed = &ctx.header_allowed;
+	let fork_point = txhashset::extending(header_pmmr, txhashset, batch, |ext, batch| {
+		let fork_point = rewind_and_apply_fork(&prev, ext, batch, header_allowed)?;
+		for block in blocks {
+			verify_coinbase_maturity(block, ext, batch)?;
+			validate_utxo(block, ext, batch)?;
+			verify_block_sums(block, batch)?;
+			apply_block_to_txhashset(block, ext, batch)?;
+		}
+		Ok(fork_point)
+	})?;
+
+	for block in blocks {
+		add_block(block, &mut ctx.batch)?;
+	}
+	if ctx.batch.tail().is_err() {
+		update_body_tail(&first.header, &mut ctx.batch)?;
+	}
+	let tip = Tip::from_header(&blocks.last().expect("non-empty batch").header);
+	update_head(&tip, &mut ctx.batch)?;
+	Ok((tip, fork_point))
+}
+
+fn process_block_inner(
+	b: &Block,
+	ctx: &mut BlockContext<'_>,
+	prevalidated: bool,
+) -> Result<(Option<Tip>, BlockHeader), Error> {
 	debug!(
 		"pipe: process_block {} at {} [in/out/kern: {}/{}/{}] ({})",
 		b.hash(),
@@ -114,7 +179,9 @@ pub fn process_block(
 
 	// Validate the block itself, make sure it is internally consistent.
 	// Use the verifier_cache for verifying rangeproofs and kernel signatures.
-	validate_block(b, ctx)?;
+	if !prevalidated {
+		validate_block(b, ctx)?;
+	}
 
 	// Start a chain extension unit of work dependent on the success of the
 	// internal validation and saving operations

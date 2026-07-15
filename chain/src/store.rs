@@ -21,6 +21,7 @@ use crate::core::global;
 use crate::core::pow::Difficulty;
 use crate::core::ser::{DeserializationMode, ProtocolVersion, Readable, Writeable};
 use crate::linked_list::MultiIndex;
+use crate::sidecar::SidecarManifest;
 use crate::types::{CommitPos, Tip};
 use crate::util::secp::pedersen::Commitment;
 use croaring::Bitmap;
@@ -37,6 +38,8 @@ const BLOCK_PREFIX: u8 = b'b';
 const HEAD_PREFIX: u8 = b'H';
 const TAIL_PREFIX: u8 = b'T';
 const PIBD_HEAD_PREFIX: u8 = b'I';
+const PIBD_IN_PROGRESS_PREFIX: u8 = b'J';
+const SIDECAR_MANIFEST_PREFIX: u8 = b'L';
 const HEADER_HEAD_PREFIX: u8 = b'G';
 /// Prefix for output pos index.
 pub const OUTPUT_POS_PREFIX: u8 = b'p';
@@ -113,6 +116,21 @@ impl ChainStore {
 			Ok(r) => Ok(r),
 			Err(_) => Ok(Tip::from_header(&global::get_genesis_block().header)),
 		}
+	}
+
+	/// Whether a physical PIBD head key exists, without applying the genesis fallback.
+	pub fn has_pibd_head(&self) -> Result<bool, Error> {
+		self.db.exists(None, &[PIBD_HEAD_PREFIX])
+	}
+
+	/// Target recorded for an interrupted PIBD reconstruction.
+	pub fn pibd_in_progress(&self) -> Result<Option<Tip>, Error> {
+		self.db.get_ser(None, &[PIBD_IN_PROGRESS_PREFIX], None)
+	}
+
+	/// Durable archive sidecar generations.
+	pub(crate) fn sidecar_manifest(&self) -> Result<Option<SidecarManifest>, Error> {
+		self.db.get_ser(None, &[SIDECAR_MANIFEST_PREFIX], None)
 	}
 
 	/// Header of the block at the head of the block chain (not the same thing as header_head).
@@ -252,6 +270,24 @@ impl<'a> Batch<'a> {
 	/// Save PIBD head to db.
 	pub fn save_pibd_head(&mut self, t: &Tip) -> Result<(), Error> {
 		self.db.put_ser(None, &[PIBD_HEAD_PREFIX], t)
+	}
+
+	/// Mark a PIBD reconstruction before changing any PMMR state.
+	pub fn save_pibd_in_progress(&mut self, t: &Tip) -> Result<(), Error> {
+		self.db.put_ser(None, &[PIBD_IN_PROGRESS_PREFIX], t)
+	}
+
+	/// Clear the PIBD marker after the reconstructed state is fully validated.
+	pub fn clear_pibd_in_progress(&mut self) -> Result<(), Error> {
+		self.db.delete(None, &[PIBD_IN_PROGRESS_PREFIX])
+	}
+
+	/// Publish a sidecar generation with the same transaction as the body head.
+	pub(crate) fn save_sidecar_manifest(
+		&mut self,
+		manifest: &SidecarManifest,
+	) -> Result<(), Error> {
+		self.db.put_ser(None, &[SIDECAR_MANIFEST_PREFIX], manifest)
 	}
 
 	/// get block

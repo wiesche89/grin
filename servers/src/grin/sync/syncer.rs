@@ -19,6 +19,7 @@ use std::time;
 use crate::chain::{self, SyncState, SyncStatus};
 use crate::core::global;
 use crate::core::pow::Difficulty;
+use crate::grin::sync::archive_sync::ArchiveSyncPipeline;
 use crate::grin::sync::body_sync::BodySync;
 use crate::grin::sync::header_sync::HeaderSync;
 use crate::grin::sync::state_sync::StateSync;
@@ -30,11 +31,12 @@ pub fn run_sync(
 	peers: Arc<p2p::Peers>,
 	chain: Arc<chain::Chain>,
 	stop_state: Arc<StopState>,
+	archive_sync: Arc<ArchiveSyncPipeline>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
 	thread::Builder::new()
 		.name("sync".to_string())
 		.spawn(move || {
-			let runner = SyncRunner::new(sync_state, peers, chain, stop_state);
+			let runner = SyncRunner::new(sync_state, peers, chain, stop_state, archive_sync);
 			runner.sync_loop();
 		})
 }
@@ -44,6 +46,7 @@ pub struct SyncRunner {
 	peers: Arc<p2p::Peers>,
 	chain: Arc<chain::Chain>,
 	stop_state: Arc<StopState>,
+	archive_sync: Arc<ArchiveSyncPipeline>,
 }
 
 impl SyncRunner {
@@ -52,12 +55,14 @@ impl SyncRunner {
 		peers: Arc<p2p::Peers>,
 		chain: Arc<chain::Chain>,
 		stop_state: Arc<StopState>,
+		archive_sync: Arc<ArchiveSyncPipeline>,
 	) -> SyncRunner {
 		SyncRunner {
 			sync_state,
 			peers,
 			chain,
 			stop_state,
+			archive_sync,
 		}
 	}
 
@@ -137,6 +142,7 @@ impl SyncRunner {
 			self.sync_state.clone(),
 			self.peers.clone(),
 			self.chain.clone(),
+			self.archive_sync.clone(),
 		);
 		let mut state_sync = StateSync::new(
 			self.sync_state.clone(),
@@ -167,8 +173,10 @@ impl SyncRunner {
 
 			// quick short-circuit (and a decent sleep) if no syncing is needed
 			if !needs_syncing {
+				self.archive_sync.set_active(false);
 				if currently_syncing {
 					self.sync_state.update(SyncStatus::NoSync);
+					self.chain.sync_complete();
 
 					// Initial transition out of a "syncing" state and into NoSync.
 					// This triggers a chain compaction to keep out local node tidy.
@@ -212,10 +220,14 @@ impl SyncRunner {
 				| SyncStatus::TxHashsetRangeProofsValidation { .. }
 				| SyncStatus::TxHashsetKernelsValidation { .. }
 				| SyncStatus::TxHashsetSave
-				| SyncStatus::TxHashsetDone => check_state_sync = true,
+				| SyncStatus::TxHashsetDone => {
+					self.archive_sync.set_active(false);
+					check_state_sync = true;
+				}
 				_ => {
 					// skip body sync if header chain is not synced.
 					if sync_head.height < highest_height {
+						self.archive_sync.set_active(false);
 						continue;
 					}
 

@@ -41,6 +41,7 @@ pub mod linked_list;
 pub mod pibd_params;
 pub mod pihd_params;
 pub mod pipe;
+mod sidecar;
 pub mod store;
 pub mod txhashset;
 pub mod types;
@@ -52,5 +53,5 @@ pub use crate::error::Error;
 pub use crate::store::ChainStore;
 pub use crate::types::{
 	BlockStatus, ChainAdapter, HeaderSyncMode, Options, SyncState, SyncStatus, Tip,
-	TxHashsetDownloadStats, TxHashsetWriteStatus,
+	TxHashsetDownloadStats, TxHashsetWriteStatus, ValidatedBlock,
 };

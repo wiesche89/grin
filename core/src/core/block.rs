@@ -748,21 +748,56 @@ impl Block {
 		Ok(offset)
 	}
 
+	fn block_kernel_offset_with_secp(
+		&self,
+		prev_kernel_offset: BlindingFactor,
+		secp: &secp::Secp256k1,
+	) -> Result<BlindingFactor, Error> {
+		if self.header.total_kernel_offset() == prev_kernel_offset {
+			Ok(BlindingFactor::zero())
+		} else {
+			Ok(committed::sum_kernel_offsets_with_secp(
+				vec![self.header.total_kernel_offset()],
+				vec![prev_kernel_offset],
+				secp,
+			)?)
+		}
+	}
+
 	/// Validates all the elements in a block that can be checked without
 	/// additional data. Includes commitment sums and kernels, Merkle
 	/// trees, reward, etc.
 	pub fn validate(&self, prev_kernel_offset: &BlindingFactor) -> Result<(), Error> {
 		self.body.validate(Weighting::AsBlock)?;
-
 		self.verify_kernel_lock_heights()?;
 		self.verify_nrd_kernels_for_header_version()?;
 		self.verify_coinbase()?;
-
-		// take the kernel offset for this block (block offset minus previous) and
-		// verify.body.outputs and kernel sums
 		self.verify_kernel_sums(
 			self.header.overage(),
 			self.block_kernel_offset(prev_kernel_offset.clone())?,
+		)?;
+		Ok(())
+	}
+
+	/// Validate this block using a caller-owned secp context for the expensive
+	/// proof and signature checks.
+	pub fn validate_with_secp(
+		&self,
+		prev_kernel_offset: &BlindingFactor,
+		secp: &secp::Secp256k1,
+	) -> Result<(), Error> {
+		self.body.validate_with_secp(Weighting::AsBlock, secp)?;
+
+		self.verify_kernel_lock_heights()?;
+		self.verify_nrd_kernels_for_header_version()?;
+		self.verify_coinbase_with_secp(secp)?;
+
+		// take the kernel offset for this block (block offset minus previous) and
+		// verify.body.outputs and kernel sums
+		self.verify_kernel_sums_with_secp(
+			self.header.overage(),
+			self.block_kernel_offset_with_secp(prev_kernel_offset.clone(), secp)?,
+			secp,
 		)?;
 
 		Ok(())
@@ -772,6 +807,13 @@ impl Block {
 	/// Check the sum of coinbase-marked outputs match
 	/// the sum of coinbase-marked kernels accounting for fees.
 	pub fn verify_coinbase(&self) -> Result<(), Error> {
+		let secp = static_secp_instance();
+		let secp = secp.lock();
+		self.verify_coinbase_with_secp(&secp)
+	}
+
+	/// Validate the coinbase commitment sum with a caller-owned secp context.
+	pub fn verify_coinbase_with_secp(&self, secp: &secp::Secp256k1) -> Result<(), Error> {
 		let cb_outs = self
 			.body
 			.outputs
@@ -787,8 +829,6 @@ impl Block {
 			.collect::<Vec<&TxKernel>>();
 
 		{
-			let secp = static_secp_instance();
-			let secp = secp.lock();
 			let over_commit = secp.commit_value(reward(self.total_fees()))?;
 
 			let out_adjust_sum =

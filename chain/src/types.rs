@@ -154,6 +154,36 @@ pub struct TxHashsetDownloadStats {
 	pub total_size: u64,
 }
 
+/// A block whose context-free checks have already been performed by [`Chain`](crate::Chain).
+///
+/// The inner block is deliberately private. This prevents callers from changing the block
+/// between validation and the stateful chain update.
+#[derive(Debug, Clone)]
+pub struct ValidatedBlock {
+	pub(crate) block: Block,
+	pub(crate) hash: Hash,
+	pub(crate) prev_hash: Hash,
+	pub(crate) version: HeaderVersion,
+	pub(crate) header_head: Hash,
+}
+
+impl ValidatedBlock {
+	/// The validated block hash.
+	pub fn hash(&self) -> Hash {
+		self.hash
+	}
+
+	/// The validated block height.
+	pub fn height(&self) -> u64 {
+		self.block.header.height
+	}
+
+	/// Consume the validation token and return its block for the ordinary path.
+	pub fn into_block(self) -> Block {
+		self.block
+	}
+}
+
 impl Default for TxHashsetDownloadStats {
 	fn default() -> Self {
 		TxHashsetDownloadStats {
@@ -1060,6 +1090,9 @@ pub trait ChainAdapter {
 	/// The blockchain pipeline has accepted this block as valid and added
 	/// it to our chain.
 	fn block_accepted(&self, block: &Block, status: BlockStatus, opts: Options);
+
+	/// Reconcile consumers that deliberately deferred per-block work during sync.
+	fn sync_complete(&self) {}
 }
 
 /// Inform the caller of the current status of a txhashset write operation,

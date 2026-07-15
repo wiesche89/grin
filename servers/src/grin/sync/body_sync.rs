@@ -22,12 +22,14 @@ use std::sync::Arc;
 use crate::chain::{self, SyncState, SyncStatus, Tip};
 use crate::core::core::hash::{Hash, Hashed};
 use crate::core::core::BlockHeader;
+use crate::grin::sync::archive_sync::ArchiveSyncPipeline;
 use crate::p2p;
 
 pub struct BodySync {
 	chain: Arc<chain::Chain>,
 	peers: Arc<p2p::Peers>,
 	sync_state: Arc<SyncState>,
+	archive_sync: Arc<ArchiveSyncPipeline>,
 
 	blocks_requested: u64,
 
@@ -40,11 +42,13 @@ impl BodySync {
 		sync_state: Arc<SyncState>,
 		peers: Arc<p2p::Peers>,
 		chain: Arc<chain::Chain>,
+		archive_sync: Arc<ArchiveSyncPipeline>,
 	) -> BodySync {
 		BodySync {
 			sync_state,
 			peers,
 			chain,
+			archive_sync,
 			blocks_requested: 0,
 			receive_timeout: Utc::now(),
 			prev_blocks_received: 0,
@@ -58,6 +62,9 @@ impl BodySync {
 		head: &chain::Tip,
 		highest_height: u64,
 	) -> Result<bool, chain::Error> {
+		if self.archive_sync.configured() {
+			self.archive_sync.set_active(true);
+		}
 		// run the body_sync every 5s
 		if self.body_sync_due()? {
 			if self.body_sync()? {
@@ -80,6 +87,13 @@ impl BodySync {
 	/// Return true if txhashset download is needed (when requested block is under the horizon).
 	/// Otherwise go request some missing blocks and return false.
 	fn body_sync(&mut self) -> Result<bool, chain::Error> {
+		if self.archive_sync.enabled() {
+			trace!("archive_sync: {:?}", self.archive_sync.stats());
+			trace!("archive_sync peers: {:?}", self.archive_sync.peer_stats());
+		}
+		for peer in self.archive_sync.take_timed_out_peers() {
+			debug!("archive block request to {} timed out", peer);
+		}
 		let head = self.chain.head()?;
 		let header_head = self.chain.header_head()?;
 		let fork_point = self.chain.fork_point()?;
@@ -128,10 +142,19 @@ impl BodySync {
 		// if we have 5 peers to sync from then ask for 50 blocks total (peer_count *
 		// 10) max will be 80 if all 8 peers are advertising more work
 		// also if the chain is already saturated with orphans, throttle
-		let block_count = cmp::min(
-			cmp::min(100, peers.len() * 10),
-			chain::MAX_ORPHAN_SIZE.saturating_sub(self.chain.orphans_len()) + 1,
-		);
+		let request_limit = if self.archive_sync.enabled() {
+			self.archive_sync.request_window()
+		} else {
+			cmp::min(100, peers.len() * 10)
+		};
+		let block_count = if self.archive_sync.enabled() {
+			request_limit
+		} else {
+			cmp::min(
+				request_limit,
+				chain::MAX_ORPHAN_SIZE.saturating_sub(self.chain.orphans_len()) + 1,
+			)
+		};
 
 		let hashes = self.block_hashes_to_sync(&fork_point, &header_head, block_count as u64)?;
 
@@ -146,17 +169,34 @@ impl BodySync {
 
 			// reinitialize download tracking state
 			self.blocks_requested = 0;
-			self.receive_timeout = Utc::now() + Duration::seconds(6);
+			self.receive_timeout = if self.archive_sync.enabled() {
+				Utc::now() + Duration::milliseconds(200)
+			} else {
+				Utc::now() + Duration::seconds(6)
+			};
 
 			let mut rng = rand::thread_rng();
 			for hash in hashes {
-				if let Some(peer) = peers.choose(&mut rng) {
+				let height = self.chain.get_block_header(&hash)?.height;
+				let mut candidates = peers.clone();
+				candidates.shuffle(&mut rng);
+				candidates.sort_by_key(|peer| self.archive_sync.peer_score(peer.info.addr.0));
+				for peer in candidates {
+					if self
+						.archive_sync
+						.request(hash, height, peer.info.addr.0)
+						.is_none()
+					{
+						continue;
+					}
 					if let Err(e) = peer.send_block_request(hash, chain::Options::SYNC) {
 						debug!("Skipped request to {}: {:?}", peer.info.addr, e);
+						self.archive_sync.cancel(&hash, peer.info.addr.0);
 						peer.stop();
 					} else {
 						self.blocks_requested += 1;
 					}
+					break;
 				}
 			}
 		}
@@ -184,6 +224,9 @@ impl BodySync {
 
 	// Should we run block body sync and ask for more full blocks?
 	fn body_sync_due(&mut self) -> Result<bool, chain::Error> {
+		if self.archive_sync.enabled() {
+			return Ok(Utc::now() >= self.receive_timeout);
+		}
 		let blocks_received = self.blocks_received()?;
 
 		// some blocks have been requested

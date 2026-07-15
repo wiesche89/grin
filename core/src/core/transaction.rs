@@ -753,21 +753,28 @@ impl TxKernel {
 
 	/// Batch signature verification.
 	pub fn batch_sig_verify(tx_kernels: &[TxKernel]) -> Result<(), Error> {
+		let secp = static_secp_instance();
+		let secp = secp.lock();
+		Self::batch_sig_verify_with_secp(tx_kernels, &secp)
+	}
+
+	/// Batch signature verification using a caller-owned secp context.
+	pub fn batch_sig_verify_with_secp(
+		tx_kernels: &[TxKernel],
+		secp: &secp::Secp256k1,
+	) -> Result<(), Error> {
 		let len = tx_kernels.len();
 		let mut sigs = Vec::with_capacity(len);
 		let mut pubkeys = Vec::with_capacity(len);
 		let mut msgs = Vec::with_capacity(len);
 
-		let secp = static_secp_instance();
-		let secp = secp.lock();
-
 		for tx_kernel in tx_kernels {
 			sigs.push(tx_kernel.excess_sig);
-			pubkeys.push(tx_kernel.excess.to_pubkey(&secp)?);
+			pubkeys.push(tx_kernel.excess.to_pubkey(secp)?);
 			msgs.push(tx_kernel.msg_to_sign()?);
 		}
 
-		if !aggsig::verify_batch(&secp, &sigs, &msgs, &pubkeys) {
+		if !aggsig::verify_batch(secp, &sigs, &msgs, &pubkeys) {
 			return Err(Error::IncorrectSignature);
 		}
 
@@ -1230,6 +1237,17 @@ impl TransactionBody {
 	/// excess value against the signature as well as range proofs for each
 	/// output.
 	pub fn validate(&self, weighting: Weighting) -> Result<(), Error> {
+		let secp = static_secp_instance();
+		let secp = secp.lock();
+		self.validate_with_secp(weighting, &secp)
+	}
+
+	/// Validate this body using a caller-owned secp context.
+	pub fn validate_with_secp(
+		&self,
+		weighting: Weighting,
+		secp: &secp::Secp256k1,
+	) -> Result<(), Error> {
 		self.validate_read(weighting)?;
 
 		// Now batch verify all those unverified rangeproofs
@@ -1240,11 +1258,11 @@ impl TransactionBody {
 				commits.push(x.commitment());
 				proofs.push(x.proof);
 			}
-			Output::batch_verify_proofs(&commits, &proofs)?;
+			Output::batch_verify_proofs_with_secp(&commits, &proofs, secp)?;
 		}
 
 		// Verify the unverified tx kernels.
-		TxKernel::batch_sig_verify(&self.kernels)?;
+		TxKernel::batch_sig_verify_with_secp(&self.kernels, secp)?;
 		Ok(())
 	}
 }
@@ -2128,8 +2146,17 @@ impl Output {
 	/// Batch validates the range proofs using the commitments
 	pub fn batch_verify_proofs(commits: &[Commitment], proofs: &[RangeProof]) -> Result<(), Error> {
 		let secp = static_secp_instance();
-		secp.lock()
-			.verify_bullet_proof_multi(commits.to_vec(), proofs.to_vec(), None)?;
+		let secp = secp.lock();
+		Self::batch_verify_proofs_with_secp(commits, proofs, &secp)
+	}
+
+	/// Batch validate range proofs using a caller-owned secp context.
+	pub fn batch_verify_proofs_with_secp(
+		commits: &[Commitment],
+		proofs: &[RangeProof],
+		secp: &secp::Secp256k1,
+	) -> Result<(), Error> {
+		secp.verify_bullet_proof_multi(commits.to_vec(), proofs.to_vec(), None)?;
 		Ok(())
 	}
 }

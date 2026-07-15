@@ -154,6 +154,9 @@ pub enum Error {
 	/// Anything else
 	#[error("Other Error: {0}")]
 	Other(String),
+	/// A prevalidated block belongs to an earlier header or body-head epoch.
+	#[error("Prevalidated block context changed")]
+	StaleValidatedBlock,
 	/// Error from summing and verifying kernel sums via committed trait.
 	#[error("Committed Trait: Error summing and verifying kernel sums")]
 	Committed {
@@ -203,6 +206,7 @@ impl Error {
 			| Error::SerErr { .. }
 			| Error::TxHashSetErr(_)
 			| Error::GenesisBlockRequired
+			| Error::StaleValidatedBlock
 			| Error::Other(_) => false,
 			_ => true,
 		}
