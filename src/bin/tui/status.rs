@@ -183,7 +183,7 @@ impl TUIStatusView {
 				.child(
 					LinearLayout::new(Orientation::Horizontal)
 						.child(TextView::new("Uptime:                       "))
-						.child(TextView::new("0").with_name("basic_runtime_seconds")),
+						.child(TextView::new("0").with_name("basic_uptime")),
 				)
 				.child(
 					LinearLayout::new(Orientation::Horizontal)
@@ -297,7 +297,7 @@ impl TUIStatusListener for TUIStatusView {
 	fn update(c: &mut Cursive, stats: &ServerStats) {
 		let basic_status = TUIStatusView::update_sync_status(stats.sync_status);
 
-		c.call_on_name("basic_runtime_seconds", |t: &mut TextView| {
+		c.call_on_name("basic_uptime", |t: &mut TextView| {
 			t.set_content(stats.uptime_format());
 		});
 		c.call_on_name("basic_current_status", |t: &mut TextView| {

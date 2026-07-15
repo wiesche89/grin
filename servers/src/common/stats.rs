@@ -47,7 +47,7 @@ impl Default for ServerStateInfo {
 /// consumers might be interested in, such as test results or UI
 #[derive(Debug, Clone)]
 pub struct ServerStats {
-	/// Server runtime in seconds
+	/// Server uptime in seconds
 	pub uptime_seconds: u64,
 	/// Number of peers
 	pub peer_count: u32,
@@ -72,7 +72,7 @@ pub struct ServerStats {
 impl ServerStats {
 	/// Formatted uptime (i.e.: 1y 17d 5h 10m 48s).
 	pub fn uptime_format(&self) -> String {
-		let time = millisecond::Millisecond::from_millis(self.uptime_seconds * 1000);
+		let time = millisecond::Millisecond::from_secs(self.uptime_seconds);
 		time.pretty()
 	}
 }
