@@ -40,6 +40,7 @@ use crate::types::{
 };
 use crate::util::secp::pedersen::RangeProof;
 use chrono::prelude::{DateTime, Utc};
+use rand::{thread_rng, Rng};
 
 const MAX_TRACK_SIZE: usize = 30;
 const MAX_PEER_MSG_PER_MIN: u64 = 500;
@@ -66,6 +67,8 @@ pub struct Peer {
 	stop_handle: Mutex<conn::StopHandle>,
 	// Whether or not we requested a txhashset from this peer
 	state_sync_requested: Arc<AtomicBool>,
+	mwixnet_request_id: Arc<Mutex<Option<u64>>>,
+	mwixnet_offer_request_id: Arc<Mutex<Option<u64>>>,
 }
 
 impl fmt::Debug for Peer {
@@ -79,11 +82,15 @@ impl Peer {
 	fn new(info: PeerInfo, conn: TcpStream, adapter: Arc<dyn NetAdapter>) -> std::io::Result<Peer> {
 		let state = Arc::new(RwLock::new(State::Connected));
 		let state_sync_requested = Arc::new(AtomicBool::new(false));
+		let mwixnet_request_id = Arc::new(Mutex::new(None));
+		let mwixnet_offer_request_id = Arc::new(Mutex::new(None));
 		let tracking_adapter = TrackingAdapter::new(adapter);
 		let handler = Protocol::new(
 			Arc::new(tracking_adapter.clone()),
 			info.clone(),
 			state_sync_requested.clone(),
+			mwixnet_request_id.clone(),
+			mwixnet_offer_request_id.clone(),
 		);
 		let tracker = Arc::new(conn::Tracker::new());
 		let (sendh, stoph) = conn::listen(conn, info.version, tracker.clone(), handler)?;
@@ -97,6 +104,8 @@ impl Peer {
 			send_handle,
 			stop_handle,
 			state_sync_requested,
+			mwixnet_request_id,
+			mwixnet_offer_request_id,
 		})
 	}
 
@@ -363,6 +372,112 @@ impl Peer {
 			},
 			msg::Type::GetPeerAddrs,
 		)
+	}
+
+	pub fn send_mwixnet_route_request(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+	) -> Result<bool, Error> {
+		if !self
+			.info
+			.capabilities
+			.contains(Capabilities::MWIXNET_ROUTE_RELAY)
+		{
+			return Ok(false);
+		}
+		let mut pending = self.mwixnet_request_id.lock();
+		if pending.is_some() {
+			return Ok(false);
+		}
+		let mut request_id = thread_rng().gen::<u64>();
+		while request_id == 0 {
+			request_id = thread_rng().gen::<u64>();
+		}
+		*pending = Some(request_id);
+		let request = mwixnet_protocol::GetMwixnetRoutes {
+			version: mwixnet_protocol::MWIXNET_PROTOCOL_VERSION,
+			request_id,
+			cursor,
+			limit: mwixnet_protocol::P2P_BATCH_MAX_ROUTES as u16,
+		};
+		if let Err(error) = self.send(request, msg::Type::GetMwixnetRoutes) {
+			*pending = None;
+			return Err(error);
+		}
+		Ok(true)
+	}
+
+	pub fn send_mwixnet_route(
+		&self,
+		item: &mwixnet_protocol::RouteRelayItem,
+	) -> Result<bool, Error> {
+		if !self
+			.info
+			.capabilities
+			.contains(Capabilities::MWIXNET_ROUTE_RELAY)
+		{
+			return Ok(false);
+		}
+		match item {
+			mwixnet_protocol::RouteRelayItem::Announcement(item) => {
+				self.send(item, msg::Type::MwixnetRouteAnnouncement)?
+			}
+			mwixnet_protocol::RouteRelayItem::Status(item) => {
+				self.send(item, msg::Type::MwixnetRouteStatus)?
+			}
+			mwixnet_protocol::RouteRelayItem::Revocation(item) => {
+				self.send(item, msg::Type::MwixnetRouteRevocation)?
+			}
+		}
+		Ok(true)
+	}
+
+	pub fn send_mwixnet_offer_request(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+	) -> Result<bool, Error> {
+		if !self
+			.info
+			.capabilities
+			.contains(Capabilities::MWIXNET_OFFER_RELAY)
+		{
+			return Ok(false);
+		}
+		let mut pending = self.mwixnet_offer_request_id.lock();
+		if pending.is_some() {
+			return Ok(false);
+		}
+		let mut request_id = thread_rng().gen::<u64>();
+		while request_id == 0 {
+			request_id = thread_rng().gen::<u64>();
+		}
+		*pending = Some(request_id);
+		let request = mwixnet_protocol::GetMwixnetOffers {
+			version: mwixnet_protocol::MWIXNET_PROTOCOL_VERSION,
+			request_id,
+			cursor,
+			limit: mwixnet_protocol::P2P_OFFER_BATCH_MAX_ITEMS as u16,
+		};
+		if let Err(error) = self.send(request, msg::Type::GetMwixnetOffers) {
+			*pending = None;
+			return Err(error);
+		}
+		Ok(true)
+	}
+
+	pub fn send_mwixnet_offer(
+		&self,
+		item: &mwixnet_protocol::OfferAnnouncement,
+	) -> Result<bool, Error> {
+		if !self
+			.info
+			.capabilities
+			.contains(Capabilities::MWIXNET_OFFER_RELAY)
+		{
+			return Ok(false);
+		}
+		self.send(item, msg::Type::MwixnetOfferAnnouncement)?;
+		Ok(true)
 	}
 
 	pub fn send_txhashset_request(&self, height: u64, hash: Hash) -> Result<(), Error> {
@@ -707,9 +822,69 @@ impl ChainAdapter for TrackingAdapter {
 	) -> Result<HeaderSegmentAcceptance, chain::Error> {
 		self.adapter.receive_header_segment(id, headers, peer_info)
 	}
+
+	fn mwixnet_routes(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::RouteRelayItem>,
+		),
+		chain::Error,
+	> {
+		self.adapter.mwixnet_routes(cursor, limit)
+	}
+
+	fn mwixnet_route_received(
+		&self,
+		item: mwixnet_protocol::RouteRelayItem,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		self.adapter.mwixnet_route_received(item, peer_info)
+	}
+
+	fn mwixnet_offers(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::OfferAnnouncement>,
+		),
+		chain::Error,
+	> {
+		self.adapter.mwixnet_offers(cursor, limit)
+	}
+
+	fn mwixnet_offer_received(
+		&self,
+		item: mwixnet_protocol::OfferAnnouncement,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		self.adapter.mwixnet_offer_received(item, peer_info)
+	}
 }
 
 impl NetAdapter for TrackingAdapter {
+	fn request_mwixnet_routes(
+		&self,
+		peer: PeerAddr,
+		cursor: Option<mwixnet_protocol::Hash>,
+	) -> Result<(), Error> {
+		self.adapter.request_mwixnet_routes(peer, cursor)
+	}
+
+	fn request_mwixnet_offers(
+		&self,
+		peer: PeerAddr,
+		cursor: Option<mwixnet_protocol::Hash>,
+	) -> Result<(), Error> {
+		self.adapter.request_mwixnet_offers(peer, cursor)
+	}
+
 	fn find_peer_addrs(&self, capab: Capabilities) -> Vec<PeerAddr> {
 		self.adapter.find_peer_addrs(capab)
 	}

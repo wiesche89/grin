@@ -62,6 +62,7 @@ pub fn node_apis<B, P>(
 	tls_config: Option<TLSConfig>,
 	api_chan: (mpsc::Sender<()>, mpsc::Receiver<()>),
 	stop_state: Arc<StopState>,
+	mwixnet_routes: Arc<p2p::RouteCache>,
 ) -> Result<(), Error>
 where
 	B: BlockChain + 'static,
@@ -104,6 +105,8 @@ where
 		Arc::downgrade(&chain),
 		Arc::downgrade(&tx_pool),
 		Arc::downgrade(&sync_state),
+		Arc::downgrade(&peers),
+		mwixnet_routes,
 	);
 	router.add_route("/v2/foreign", Arc::new(api_handler))?;
 
@@ -199,6 +202,8 @@ where
 	pub chain: Weak<Chain>,
 	pub tx_pool: Weak<RwLock<pool::TransactionPool<B, P>>>,
 	pub sync_state: Weak<SyncState>,
+	pub peers: Weak<p2p::Peers>,
+	pub mwixnet_routes: Arc<p2p::RouteCache>,
 }
 
 impl<B, P> ForeignAPIHandlerV2<B, P>
@@ -211,11 +216,15 @@ where
 		chain: Weak<Chain>,
 		tx_pool: Weak<RwLock<pool::TransactionPool<B, P>>>,
 		sync_state: Weak<SyncState>,
+		peers: Weak<p2p::Peers>,
+		mwixnet_routes: Arc<p2p::RouteCache>,
 	) -> Self {
 		ForeignAPIHandlerV2 {
 			chain,
 			tx_pool,
 			sync_state,
+			peers,
+			mwixnet_routes,
 		}
 	}
 }
@@ -226,10 +235,18 @@ where
 	P: PoolAdapter + 'static,
 {
 	fn post(&self, req: Request<Incoming>) -> ResponseFuture {
+		let api_caller = req
+			.extensions()
+			.get::<SocketAddr>()
+			.map(|addr| p2p::PeerAddr::from_ip(addr.ip()))
+			.unwrap_or_else(|| p2p::PeerAddr::from_ip("127.0.0.1".parse().unwrap()));
 		let api = Foreign::new(
 			self.chain.clone(),
 			self.tx_pool.clone(),
 			self.sync_state.clone(),
+			self.peers.clone(),
+			self.mwixnet_routes.clone(),
+			api_caller,
 		);
 
 		Box::pin(async move {

@@ -134,6 +134,15 @@ fn comments() -> HashMap<String, String> {
 	);
 
 	retval.insert(
+		"route_relay_allowlist".to_string(),
+		"
+#swap server Ed25519 identities accepted by the MWixnet route relay
+#a non-empty allowlist is required to enable the relay on mainnet
+"
+		.to_string(),
+	);
+
+	retval.insert(
 		"skip_sync_wait".to_string(),
 		"
 #skip waiting for sync on startup, (optional param, mostly for testing)

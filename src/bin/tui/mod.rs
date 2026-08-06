@@ -16,6 +16,7 @@ mod constants;
 mod logs;
 mod menu;
 mod mining;
+mod mwixnet;
 mod peers;
 mod status;
 mod types;

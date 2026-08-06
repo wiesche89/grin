@@ -172,6 +172,9 @@ pub struct ServerConfig {
 	/// Whether this node is a full archival node or a fast-sync, pruned node
 	pub archive_mode: Option<bool>,
 
+	/// Swap server identities accepted by the MWixnet route relay.
+	pub route_relay_allowlist: Option<Vec<String>>,
+
 	/// Whether to skip the sync timeout on startup
 	/// (To assist testing on solo chains)
 	pub skip_sync_wait: Option<bool>,
@@ -225,6 +228,7 @@ impl Default for ServerConfig {
 			chain_type: ChainTypes::default(),
 			future_time_limit: default_future_time_limit(),
 			archive_mode: Some(false),
+			route_relay_allowlist: None,
 			chain_validation_mode: ChainValidationMode::default(),
 			pool_config: pool::PoolConfig::default(),
 			skip_sync_wait: Some(false),

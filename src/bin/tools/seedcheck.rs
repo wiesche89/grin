@@ -116,7 +116,7 @@ pub fn check_seeds(is_testnet: bool, seed: Option<&str>) -> Vec<SeedCheckResult>
 	);
 
 	let config = p2p::types::P2PConfig::default();
-	let adapter = Arc::new(p2p::DummyAdapter {});
+	let adapter = Arc::new(p2p::DummyAdapter::default());
 	let tmp_root = ".__grintmp__";
 	let mut data_root = PathBuf::from(tmp_root);
 	data_root.push(format!("seedcheck-{}", std::process::id()));

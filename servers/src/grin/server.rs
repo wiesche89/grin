@@ -54,6 +54,17 @@ use crate::util::{RwLock, StopState};
 /// Thread-safe TransactionPool with type parameters used by server components
 pub type ServerTxPool = Arc<RwLock<pool::TransactionPool<PoolToChainAdapter, PoolToNetAdapter>>>;
 
+fn mwixnet_capabilities(
+	chain_type: global::ChainTypes,
+	has_route_relay_allowlist: bool,
+) -> Capabilities {
+	let mut capabilities = Capabilities::MWIXNET_OFFER_RELAY;
+	if chain_type != global::ChainTypes::Mainnet || has_route_relay_allowlist {
+		capabilities |= Capabilities::MWIXNET_ROUTE_RELAY;
+	}
+	capabilities
+}
+
 /// Grin server holding internal structures.
 pub struct Server {
 	/// server config
@@ -66,6 +77,8 @@ pub struct Server {
 	pub tx_pool: ServerTxPool,
 	/// Whether we're currently syncing
 	pub sync_state: Arc<SyncState>,
+	/// MWixnet route cache
+	mwixnet_routes: Arc<p2p::RouteCache>,
 	/// To be passed around to collect stats and info
 	state_info: ServerStateInfo,
 	/// Stop flag
@@ -221,21 +234,44 @@ impl Server {
 
 		pool_adapter.set_chain(shared_chain.clone());
 
+		let route_relay_allowlist = config
+			.route_relay_allowlist
+			.clone()
+			.unwrap_or_default()
+			.into_iter()
+			.map(|key| {
+				let bytes = crate::util::from_hex(&key).map_err(Error::ArgumentError)?;
+				let bytes = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+					Error::ArgumentError("invalid MWixnet route allowlist key length".into())
+				})?;
+				Ok(p2p::mwixnet_protocol::PublicKey(bytes))
+			})
+			.collect::<Result<Vec<_>, Error>>()?;
+		let mwixnet_capabilities =
+			mwixnet_capabilities(config.chain_type, !route_relay_allowlist.is_empty());
+		let mwixnet_routes = Arc::new(p2p::RouteCache::open(
+			mwixnet_capabilities.contains(Capabilities::MWIXNET_ROUTE_RELAY),
+			route_relay_allowlist,
+			&config.db_root,
+		)?);
+
 		let net_adapter = Arc::new(NetToChainAdapter::new(
 			sync_state.clone(),
 			shared_chain.clone(),
 			tx_pool.clone(),
 			config.clone(),
 			init_net_hooks(&config)?,
+			mwixnet_routes.clone(),
 		));
 
 		// Initialize our capabilities.
 		// Currently, either "default" or with optional "archive_mode" (block history) support enabled.
-		let capabilities = if let Some(true) = config.archive_mode {
+		let mut capabilities = if let Some(true) = config.archive_mode {
 			Capabilities::default() | Capabilities::BLOCK_HIST
 		} else {
 			Capabilities::default()
 		};
+		capabilities |= mwixnet_capabilities;
 		debug!("Capabilities: {:?}", capabilities);
 
 		if let Some(ref server_tx) = server_tx {
@@ -319,6 +355,7 @@ impl Server {
 			tls_conf,
 			api_chan,
 			stop_state.clone(),
+			mwixnet_routes.clone(),
 		)?;
 
 		info!("Starting dandelion monitor: {}", &config.api_http_addr);
@@ -336,6 +373,7 @@ impl Server {
 			chain: shared_chain,
 			tx_pool,
 			sync_state,
+			mwixnet_routes,
 			state_info: ServerStateInfo {
 				..Default::default()
 			},
@@ -543,6 +581,8 @@ impl Server {
 			.fold(0, |acc, m| acc + m.len());
 
 		let disk_usage_gb = format!("{:.*}", 3, (disk_usage_bytes as f64 / 1_000_000_000_f64));
+		let mwixnet_route_relay = self.mwixnet_routes.enabled();
+		let (mwixnet_routes, mwixnet_offers) = self.mwixnet_routes.snapshot();
 
 		Ok(ServerStats {
 			uptime_seconds: self.start_time.elapsed().as_secs(),
@@ -555,6 +595,9 @@ impl Server {
 			peer_stats,
 			diff_stats,
 			tx_stats,
+			mwixnet_route_relay,
+			mwixnet_routes,
+			mwixnet_offers,
 		})
 	}
 
@@ -607,5 +650,28 @@ impl Server {
 	pub fn stop_test_miner(&self, stop: Arc<StopState>) {
 		stop.stop();
 		info!("stop_test_miner - stop",);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn mainnet_mwixnet_capabilities_require_route_allowlist() {
+		let capabilities = mwixnet_capabilities(global::ChainTypes::Mainnet, false);
+		assert!(!capabilities.contains(Capabilities::MWIXNET_ROUTE_RELAY));
+		assert!(capabilities.contains(Capabilities::MWIXNET_OFFER_RELAY));
+
+		let capabilities = mwixnet_capabilities(global::ChainTypes::Mainnet, true);
+		assert!(capabilities.contains(Capabilities::MWIXNET_ROUTE_RELAY));
+		assert!(capabilities.contains(Capabilities::MWIXNET_OFFER_RELAY));
+	}
+
+	#[test]
+	fn testnet_mwixnet_route_relay_does_not_require_allowlist() {
+		let capabilities = mwixnet_capabilities(global::ChainTypes::Testnet, false);
+		assert!(capabilities.contains(Capabilities::MWIXNET_ROUTE_RELAY));
+		assert!(capabilities.contains(Capabilities::MWIXNET_OFFER_RELAY));
 	}
 }

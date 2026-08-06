@@ -30,6 +30,7 @@ extern crate enum_primitive;
 extern crate grin_core as core;
 use grin_chain as chain;
 use grin_util as util;
+pub use mwixnet_protocol;
 
 #[macro_use]
 extern crate serde_derive;
@@ -40,6 +41,7 @@ mod codec;
 mod conn;
 pub mod handshake;
 pub mod msg;
+mod mwixnet;
 mod peer;
 mod peers;
 mod protocol;
@@ -48,6 +50,7 @@ pub mod store;
 pub mod types;
 
 pub use crate::conn::SEND_CHANNEL_CAP;
+pub use crate::mwixnet::{RouteCache, RouteCacheError};
 pub use crate::peer::Peer;
 pub use crate::peers::Peers;
 pub use crate::serv::{DummyAdapter, Server};

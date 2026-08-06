@@ -317,7 +317,18 @@ impl Server {
 }
 
 /// A no-op network adapter used for testing.
-pub struct DummyAdapter {}
+#[derive(Default)]
+pub struct DummyAdapter {
+	mwixnet_routes: Option<Arc<crate::RouteCache>>,
+}
+
+impl DummyAdapter {
+	pub fn with_mwixnet_routes(mwixnet_routes: Arc<crate::RouteCache>) -> Self {
+		Self {
+			mwixnet_routes: Some(mwixnet_routes),
+		}
+	}
+}
 
 impl ChainAdapter for DummyAdapter {
 	fn total_difficulty(&self) -> Result<Difficulty, chain::Error> {
@@ -497,6 +508,66 @@ impl ChainAdapter for DummyAdapter {
 		_peer_info: &PeerInfo,
 	) -> Result<HeaderSegmentAcceptance, chain::Error> {
 		Ok(HeaderSegmentAcceptance::Accepted)
+	}
+
+	fn mwixnet_routes(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::RouteRelayItem>,
+		),
+		chain::Error,
+	> {
+		self.mwixnet_routes
+			.as_ref()
+			.ok_or_else(|| chain::Error::Other("MWixnet relay is disabled".into()))?
+			.page(cursor, limit)
+			.map_err(|error| chain::Error::Other(format!("MWixnet route cache: {:?}", error)))
+	}
+
+	fn mwixnet_route_received(
+		&self,
+		item: mwixnet_protocol::RouteRelayItem,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		self.mwixnet_routes
+			.as_ref()
+			.ok_or_else(|| chain::Error::Other("MWixnet relay is disabled".into()))?
+			.insert(item, Some(peer_info.addr))
+			.map_err(|error| chain::Error::Other(format!("MWixnet route cache: {:?}", error)))
+	}
+
+	fn mwixnet_offers(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::OfferAnnouncement>,
+		),
+		chain::Error,
+	> {
+		self.mwixnet_routes
+			.as_ref()
+			.ok_or_else(|| chain::Error::Other("MWixnet offer relay is disabled".into()))?
+			.offer_page(cursor, limit)
+			.map_err(|error| chain::Error::Other(format!("MWixnet offer cache: {:?}", error)))
+	}
+
+	fn mwixnet_offer_received(
+		&self,
+		item: mwixnet_protocol::OfferAnnouncement,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		self.mwixnet_routes
+			.as_ref()
+			.ok_or_else(|| chain::Error::Other("MWixnet offer relay is disabled".into()))?
+			.insert_offer(item, Some(peer_info.addr))
+			.map_err(|error| chain::Error::Other(format!("MWixnet offer cache: {:?}", error)))
 	}
 }
 

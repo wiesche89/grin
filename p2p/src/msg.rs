@@ -96,6 +96,14 @@ enum_from_primitive! {
 		KernelSegment = 28,
 		GetHeaderSegment = 29,
 		HeaderSegment = 30,
+		GetMwixnetRoutes = 31,
+		MwixnetRoutes = 32,
+		MwixnetRouteAnnouncement = 33,
+		MwixnetRouteStatus = 34,
+		MwixnetRouteRevocation = 35,
+		GetMwixnetOffers = 36,
+		MwixnetOffers = 37,
+		MwixnetOfferAnnouncement = 38,
 	}
 }
 
@@ -151,6 +159,14 @@ fn max_msg_size(msg_type: Type) -> u64 {
 		Type::KernelSegment => 2 * max_block_size(),
 		Type::GetHeaderSegment => 9,
 		Type::HeaderSegment => 11 + max_header_size() * MAX_BLOCK_HEADERS as u64,
+		Type::GetMwixnetRoutes => mwixnet_protocol::P2P_GET_ROUTES_MAX_BYTES,
+		Type::MwixnetRoutes => mwixnet_protocol::P2P_BATCH_MAX_BYTES,
+		Type::MwixnetRouteAnnouncement => mwixnet_protocol::P2P_ANNOUNCEMENT_MAX_BYTES,
+		Type::MwixnetRouteStatus => mwixnet_protocol::P2P_STATUS_MAX_BYTES,
+		Type::MwixnetRouteRevocation => mwixnet_protocol::P2P_REVOCATION_MAX_BYTES,
+		Type::GetMwixnetOffers => mwixnet_protocol::P2P_GET_OFFERS_MAX_BYTES,
+		Type::MwixnetOffers => mwixnet_protocol::P2P_OFFER_BATCH_MAX_BYTES,
+		Type::MwixnetOfferAnnouncement => mwixnet_protocol::P2P_OFFER_ANNOUNCEMENT_MAX_BYTES,
 	}
 }
 
@@ -360,7 +376,18 @@ impl Readable for MsgHeaderWrapper {
 		match Type::from_u8(t) {
 			Some(msg_type) => {
 				// TODO 4x the limits for now to leave ourselves space to change things.
-				let max_len = max_msg_size(msg_type) * 4;
+				let multiplier = match msg_type {
+					Type::GetMwixnetRoutes
+					| Type::MwixnetRoutes
+					| Type::MwixnetRouteAnnouncement
+					| Type::MwixnetRouteStatus
+					| Type::MwixnetRouteRevocation
+					| Type::GetMwixnetOffers
+					| Type::MwixnetOffers
+					| Type::MwixnetOfferAnnouncement => 1,
+					_ => 4,
+				};
+				let max_len = max_msg_size(msg_type) * multiplier;
 				if msg_len > max_len {
 					error!(
 						"Too large read {:?}, max_len: {}, msg_len: {}.",
@@ -981,6 +1008,14 @@ pub enum Message {
 	KernelSegment(SegmentResponse<TxKernel>),
 	GetHeaderSegment(SegmentIdentifier),
 	HeaderSegment(HeaderSegment),
+	GetMwixnetRoutes(mwixnet_protocol::GetMwixnetRoutes),
+	MwixnetRoutes(mwixnet_protocol::MwixnetRoutes),
+	MwixnetRouteAnnouncement(mwixnet_protocol::RouteAnnouncement),
+	MwixnetRouteStatus(mwixnet_protocol::RouteStatus),
+	MwixnetRouteRevocation(mwixnet_protocol::RouteRevocation),
+	GetMwixnetOffers(mwixnet_protocol::GetMwixnetOffers),
+	MwixnetOffers(mwixnet_protocol::MwixnetOffers),
+	MwixnetOfferAnnouncement(mwixnet_protocol::OfferAnnouncement),
 }
 
 /// We receive 512 headers from a peer.
@@ -1027,6 +1062,14 @@ impl fmt::Display for Message {
 			Message::KernelSegment(_) => write!(f, "kernel segment"),
 			Message::GetHeaderSegment(_) => write!(f, "get header segment"),
 			Message::HeaderSegment(_) => write!(f, "header segment"),
+			Message::GetMwixnetRoutes(_) => write!(f, "get MWixnet routes"),
+			Message::MwixnetRoutes(_) => write!(f, "MWixnet routes"),
+			Message::MwixnetRouteAnnouncement(_) => write!(f, "MWixnet route announcement"),
+			Message::MwixnetRouteStatus(_) => write!(f, "MWixnet route status"),
+			Message::MwixnetRouteRevocation(_) => write!(f, "MWixnet route revocation"),
+			Message::GetMwixnetOffers(_) => write!(f, "get MWixnet offers"),
+			Message::MwixnetOffers(_) => write!(f, "MWixnet offers"),
+			Message::MwixnetOfferAnnouncement(_) => write!(f, "MWixnet offer announcement"),
 		}
 	}
 }
@@ -1057,8 +1100,41 @@ impl fmt::Debug for Consumed {
 
 #[cfg(test)]
 mod tests {
+	use super::{MsgHeader, MsgHeaderWrapper, Type};
+	use crate::core::ser::{self, DeserializationMode, ProtocolVersion};
+
 	#[test]
 	fn test_max_header_size_limit() {
 		assert_eq!(super::max_header_size(), 578);
+	}
+
+	#[test]
+	fn mwixnet_message_types() {
+		assert_eq!(Type::GetMwixnetRoutes as u8, 31);
+		assert_eq!(Type::MwixnetRoutes as u8, 32);
+		assert_eq!(Type::MwixnetRouteAnnouncement as u8, 33);
+		assert_eq!(Type::MwixnetRouteStatus as u8, 34);
+		assert_eq!(Type::MwixnetRouteRevocation as u8, 35);
+		assert_eq!(Type::GetMwixnetOffers as u8, 36);
+		assert_eq!(Type::MwixnetOffers as u8, 37);
+		assert_eq!(Type::MwixnetOfferAnnouncement as u8, 38);
+	}
+
+	#[test]
+	fn mwixnet_message_size_is_exact() {
+		crate::core::global::set_local_chain_type(
+			crate::core::global::ChainTypes::AutomatedTesting,
+		);
+		let header = MsgHeader::new(
+			Type::MwixnetRoutes,
+			mwixnet_protocol::P2P_BATCH_MAX_BYTES + 1,
+		);
+		let bytes = ser::ser_vec(&header, ProtocolVersion::local()).unwrap();
+		let result: Result<MsgHeaderWrapper, _> = ser::deserialize(
+			&mut &bytes[..],
+			ProtocolVersion::local(),
+			DeserializationMode::default(),
+		);
+		assert_eq!(result.err(), Some(ser::Error::TooLargeReadErr));
 	}
 }

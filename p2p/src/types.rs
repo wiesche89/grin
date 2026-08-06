@@ -559,6 +559,10 @@ bitflags! {
 		const PIBD_HIST_1 = 0b0100_0000;
 		/// Can provide deterministic historical header segments.
 		const PIHD_HIST = 0b1000_0000;
+		/// Can relay MWixnet route announcements.
+		const MWIXNET_ROUTE_RELAY = 0b1_0000_0000;
+		/// Can relay MWixnet server offers.
+		const MWIXNET_OFFER_RELAY = 0b10_0000_0000;
 	}
 }
 
@@ -890,11 +894,75 @@ pub trait ChainAdapter: Sync + Send {
 		headers: &[core::BlockHeader],
 		peer_info: &PeerInfo,
 	) -> Result<HeaderSegmentAcceptance, chain::Error>;
+
+	fn mwixnet_routes(
+		&self,
+		_: Option<mwixnet_protocol::Hash>,
+		_: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::RouteRelayItem>,
+		),
+		chain::Error,
+	> {
+		Err(chain::Error::Other("MWixnet relay is disabled".into()))
+	}
+
+	fn mwixnet_route_received(
+		&self,
+		_: mwixnet_protocol::RouteRelayItem,
+		_: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		Err(chain::Error::Other("MWixnet relay is disabled".into()))
+	}
+
+	fn mwixnet_offers(
+		&self,
+		_: Option<mwixnet_protocol::Hash>,
+		_: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::OfferAnnouncement>,
+		),
+		chain::Error,
+	> {
+		Err(chain::Error::Other(
+			"MWixnet offer relay is disabled".into(),
+		))
+	}
+
+	fn mwixnet_offer_received(
+		&self,
+		_: mwixnet_protocol::OfferAnnouncement,
+		_: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		Err(chain::Error::Other(
+			"MWixnet offer relay is disabled".into(),
+		))
+	}
 }
 
 /// Additional methods required by the protocol that don't need to be
 /// externally implemented.
 pub trait NetAdapter: ChainAdapter {
+	fn request_mwixnet_routes(
+		&self,
+		_: PeerAddr,
+		_: Option<mwixnet_protocol::Hash>,
+	) -> Result<(), Error> {
+		Err(Error::UnexpectedMessage)
+	}
+
+	fn request_mwixnet_offers(
+		&self,
+		_: PeerAddr,
+		_: Option<mwixnet_protocol::Hash>,
+	) -> Result<(), Error> {
+		Err(Error::UnexpectedMessage)
+	}
+
 	/// Find good peers we know with the provided capability and return their
 	/// addresses.
 	fn find_peer_addrs(&self, capab: Capabilities) -> Vec<PeerAddr>;

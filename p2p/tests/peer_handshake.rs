@@ -23,6 +23,7 @@ use crate::core::global;
 use crate::core::pow::Difficulty;
 use crate::p2p::msg::built_info;
 use crate::p2p::types::PeerAddr;
+use ed25519_dalek::{Signer, SigningKey};
 use grin_p2p::msg::PeerAddrs;
 use std::fs;
 use std::net::{SocketAddr, TcpListener};
@@ -48,11 +49,82 @@ fn clean_output_dir(dir_name: &str) {
 	let _ = fs::remove_dir_all(dir_name);
 }
 
+fn mwixnet_announcement(key: &SigningKey, now: u64) -> p2p::mwixnet_protocol::RouteAnnouncement {
+	use p2p::mwixnet_protocol::{
+		Hash as MwixnetHash, MwixnetType, OnionAddress, PublicKey, RouteAnnouncement, RouteState,
+		Signature, MWIXNET_PROTOCOL_VERSION,
+	};
+	let identity = PublicKey(key.verifying_key().to_bytes());
+	let mut item = RouteAnnouncement {
+		version: MWIXNET_PROTOCOL_VERSION,
+		msg_type: MwixnetType::RouteAnnouncement,
+		route_id: MwixnetHash([1; 32]),
+		manifest_sequence: 1,
+		entry_onion: OnionAddress(identity.0),
+		swap_identity: identity,
+		hop_count: 2,
+		participant_identities: vec![
+			identity,
+			PublicKey(SigningKey::from_bytes(&[8; 32]).verifying_key().to_bytes()),
+		],
+		fee_per_hop: 1,
+		manifest_hash: MwixnetHash([2; 32]),
+		health_hash: MwixnetHash([4; 32]),
+		status: RouteState::Healthy,
+		last_verified: now,
+		valid_until: now + 600,
+		sequence: 1,
+		signature: Signature([0; 64]),
+	};
+	item.signature = Signature(key.sign(item.hash().as_bytes()).to_bytes());
+	item
+}
+
+fn mwixnet_offer(key: &SigningKey, now: u64) -> p2p::mwixnet_protocol::OfferAnnouncement {
+	use p2p::mwixnet_protocol::{
+		MixerOffer, MwixnetOffer, MwixnetType, OfferAnnouncement, OnionAddress, OnionPublicKey,
+		PublicKey, Signature, MWIXNET_PROTOCOL_VERSION,
+	};
+	let identity = PublicKey(key.verifying_key().to_bytes());
+	let mut offer = MixerOffer {
+		version: MWIXNET_PROTOCOL_VERSION,
+		msg_type: MwixnetType::MixerOffer,
+		identity_public_key: identity,
+		onion_address: OnionAddress(identity.0),
+		onion_public_key: OnionPublicKey([2; 32]),
+		minimum_fee: 1,
+		capacity: 32,
+		valid_until: now + 3_600,
+		sequence: 1,
+		signature: Signature([0; 64]),
+	};
+	offer.signature = Signature(key.sign(offer.hash().as_bytes()).to_bytes());
+	OfferAnnouncement::mine(MwixnetOffer::Mixer(offer))
+}
+
 fn p2p_server(
 	dir: &str,
 	peers_allow: Vec<PeerAddr>,
 	peers_deny: Vec<PeerAddr>,
 	port: Option<u16>,
+) -> (SocketAddr, Arc<p2p::Server>) {
+	p2p_server_with_adapter(
+		dir,
+		peers_allow,
+		peers_deny,
+		port,
+		p2p::Capabilities::UNKNOWN,
+		Arc::new(p2p::DummyAdapter::default()),
+	)
+}
+
+fn p2p_server_with_adapter(
+	dir: &str,
+	peers_allow: Vec<PeerAddr>,
+	peers_deny: Vec<PeerAddr>,
+	port: Option<u16>,
+	capabilities: p2p::Capabilities,
+	net_adapter: Arc<dyn p2p::ChainAdapter>,
 ) -> (SocketAddr, Arc<p2p::Server>) {
 	let p2p_config = p2p::P2PConfig {
 		host: "127.0.0.1".parse().unwrap(),
@@ -69,11 +141,10 @@ fn p2p_server(
 		},
 		..p2p::P2PConfig::default()
 	};
-	let net_adapter = Arc::new(p2p::DummyAdapter {});
 	let server = Arc::new(
 		p2p::Server::new(
 			dir,
-			p2p::Capabilities::UNKNOWN,
+			capabilities,
 			p2p_config.clone(),
 			net_adapter.clone(),
 			Hash::from_vec(&vec![]),
@@ -187,4 +258,61 @@ fn peer_handshake() {
 		assert!(server.connect(PeerAddr(addr2)).is_err());
 		assert_eq!(server.peers.iter().connected().count(), 0);
 	}
+}
+
+#[test]
+fn mwixnet_relay_between_peers() {
+	test_setup();
+	let first_dir = "target/mwixnet_relay_first";
+	let second_dir = "target/mwixnet_relay_second";
+	clean_output_dir(first_dir);
+	clean_output_dir(second_dir);
+
+	let first_cache = Arc::new(p2p::RouteCache::new(true, vec![]));
+	let second_cache = Arc::new(p2p::RouteCache::new(true, vec![]));
+	let capabilities =
+		p2p::Capabilities::MWIXNET_ROUTE_RELAY | p2p::Capabilities::MWIXNET_OFFER_RELAY;
+	let (_, first) = p2p_server_with_adapter(
+		first_dir,
+		vec![],
+		vec![],
+		None,
+		capabilities,
+		Arc::new(p2p::DummyAdapter::with_mwixnet_routes(first_cache.clone())),
+	);
+	let (second_addr, second) = p2p_server_with_adapter(
+		second_dir,
+		vec![],
+		vec![],
+		None,
+		capabilities,
+		Arc::new(p2p::DummyAdapter::with_mwixnet_routes(second_cache.clone())),
+	);
+	first.connect(PeerAddr(second_addr)).unwrap();
+
+	let now = chrono::Utc::now().timestamp() as u64;
+	let key = SigningKey::from_bytes(&[7; 32]);
+	let route =
+		p2p::mwixnet_protocol::RouteRelayItem::Announcement(mwixnet_announcement(&key, now));
+	let offer = mwixnet_offer(&key, now);
+	first_cache.insert(route.clone(), None).unwrap();
+	first_cache.insert_offer(offer.clone(), None).unwrap();
+	first.peers.broadcast_mwixnet_route(&route, None);
+	first.peers.broadcast_mwixnet_offer(&offer, None);
+
+	for _ in 0..50 {
+		let routes = second_cache.page(None, 1).unwrap().1;
+		let offers = second_cache.offer_page(None, 1).unwrap().1;
+		if routes == vec![route.clone()] && offers == vec![offer.clone()] {
+			break;
+		}
+		thread::sleep(time::Duration::from_millis(100));
+	}
+	assert_eq!(second_cache.page(None, 1).unwrap().1, vec![route]);
+	assert_eq!(second_cache.offer_page(None, 1).unwrap().1, vec![offer]);
+
+	first.stop();
+	second.stop();
+	clean_output_dir(first_dir);
+	clean_output_dir(second_dir);
 }

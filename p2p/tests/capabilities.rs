@@ -56,3 +56,10 @@ fn default_capabilities() {
 			| Capabilities::PIHD_HIST
 	);
 }
+
+#[test]
+fn mwixnet_route_relay_capability() {
+	assert_eq!(Capabilities::MWIXNET_ROUTE_RELAY.bits(), 0x100);
+	assert_eq!(Capabilities::MWIXNET_OFFER_RELAY.bits(), 0x200);
+	assert!(!Capabilities::default().contains(Capabilities::MWIXNET_ROUTE_RELAY));
+}

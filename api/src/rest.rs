@@ -22,6 +22,7 @@ use crate::router::{Handler, HandlerObj, ResponseFuture, Router, RouterError};
 use crate::web::response;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
+use hyper::service::{service_fn, Service};
 use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::pem::{PemObject, SectionKind};
@@ -220,14 +221,14 @@ fn start_server(
 			tokio::select! {
 				Ok(s) = async {
 					match l.accept().await {
-						Ok((s, _)) => Ok::<Option<tokio::net::TcpStream>, Error>(Some(s)),
+						Ok((s, addr)) => Ok::<Option<(tokio::net::TcpStream, SocketAddr)>, Error>(Some((s, addr))),
 						Err(e) => {
 							error!("Failed to accept connection: {e:#}");
 							Ok(None)
 						}
 					}
 				} => {
-					if let Some(s) = s {
+					if let Some((s, remote_addr)) = s {
 						if let Some(tls) = tls.clone() {
 							let router = router.clone();
 							let watcher = graceful.watcher();
@@ -245,14 +246,23 @@ fn start_server(
 									}
 								};
 								let io = TokioIo::new(tls_stream);
-								let conn = http1::Builder::new().serve_connection(io, router);
+								let service = service_fn(move |mut request| {
+									request.extensions_mut().insert(remote_addr);
+									router.call(request)
+								});
+								let conn = http1::Builder::new().serve_connection(io, service);
 								if let Err(e) = watcher.watch(conn).await {
 									error!("API TLS server error: {:?}", e);
 								}
 							});
 						} else {
 							let io = TokioIo::new(s);
-							let conn = http1::Builder::new().serve_connection(io, router.clone());
+							let router = router.clone();
+							let service = service_fn(move |mut request| {
+								request.extensions_mut().insert(remote_addr);
+								router.call(request)
+							});
+							let conn = http1::Builder::new().serve_connection(io, service);
 							let fut = graceful.watch(conn);
 							tokio::spawn(async move {
 								if let Err(e) = fut.await {

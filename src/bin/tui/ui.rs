@@ -18,9 +18,11 @@
 use super::constants::MAIN_MENU;
 use crate::built_info;
 use crate::servers::Server;
-use crate::tui::constants::{ROOT_STACK, VIEW_BASIC_STATUS, VIEW_MINING, VIEW_PEER_SYNC};
+use crate::tui::constants::{
+	ROOT_STACK, VIEW_BASIC_STATUS, VIEW_MINING, VIEW_MWIXNET, VIEW_PEER_SYNC,
+};
 use crate::tui::types::{TUIStatusListener, UIMessage};
-use crate::tui::{logs, menu, mining, peers, status, version};
+use crate::tui::{logs, menu, mining, mwixnet, peers, status, version};
 use chrono::prelude::Utc;
 use cursive::direction::Orientation;
 use cursive::theme::BaseColor::{Black, Blue, Cyan, White};
@@ -84,6 +86,7 @@ impl UI {
 		let status_view = status::TUIStatusView::create();
 		let mining_view = mining::TUIMiningView::create();
 		let peer_view = peers::TUIPeerView::create();
+		let mwixnet_view = mwixnet::TUIMwixnetView::create();
 		let logs_view = logs::TUILogsView::create();
 		let version_view = version::TUIVersionView::create();
 
@@ -93,6 +96,7 @@ impl UI {
 			.layer(version_view)
 			.layer(mining_view)
 			.layer(peer_view)
+			.layer(mwixnet_view)
 			.layer(logs_view)
 			.layer(status_view)
 			.with_name(ROOT_STACK)
@@ -163,6 +167,7 @@ impl UI {
 						}
 						VIEW_MINING => mining::TUIMiningView::update(&mut self.cursive, &update),
 						VIEW_PEER_SYNC => peers::TUIPeerView::update(&mut self.cursive, &update),
+						VIEW_MWIXNET => mwixnet::TUIMwixnetView::update(&mut self.cursive, &update),
 						_ => {}
 					},
 				}

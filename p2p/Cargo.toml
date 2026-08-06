@@ -26,8 +26,11 @@ grin_core = { path = "../core", version = "5.5.1-alpha.0" }
 grin_store = { path = "../store", version = "5.5.1-alpha.0" }
 grin_util = { path = "../util", version = "5.5.1-alpha.0" }
 grin_chain = { path = "../chain", version = "5.5.1-alpha.0" }
+mwixnet-protocol = { git = "https://github.com/wiesche89/mwixnet", rev = "b7c0ad72e520cdb3ca1cc0ca9ad142a8f520efe1" }
 
 [dev-dependencies]
+ed25519-dalek = "2.1.1"
+serde_json = "1"
 grin_pool = { path = "../pool", version = "5.5.1-alpha.0" }
 
 [build-dependencies]

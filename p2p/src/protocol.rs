@@ -22,16 +22,22 @@ use crate::msg::{
 	Type,
 };
 use crate::types::{AttachmentMeta, Error, NetAdapter, PeerInfo};
+use crate::util::Mutex;
 use chrono::prelude::Utc;
 use rand::{thread_rng, Rng};
 use std::fs::{self, File};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+const MAX_MWIXNET_MESSAGES_PER_MINUTE: usize = 16;
+
 pub struct Protocol {
 	adapter: Arc<dyn NetAdapter>,
 	peer_info: PeerInfo,
 	state_sync_requested: Arc<AtomicBool>,
+	mwixnet_request_id: Arc<Mutex<Option<u64>>>,
+	mwixnet_offer_request_id: Arc<Mutex<Option<u64>>>,
+	mwixnet_rate: Mutex<(i64, usize)>,
 }
 
 impl Protocol {
@@ -39,12 +45,57 @@ impl Protocol {
 		adapter: Arc<dyn NetAdapter>,
 		peer_info: PeerInfo,
 		state_sync_requested: Arc<AtomicBool>,
+		mwixnet_request_id: Arc<Mutex<Option<u64>>>,
+		mwixnet_offer_request_id: Arc<Mutex<Option<u64>>>,
 	) -> Protocol {
 		Protocol {
 			adapter,
 			peer_info,
 			state_sync_requested,
+			mwixnet_request_id,
+			mwixnet_offer_request_id,
+			mwixnet_rate: Mutex::new((Utc::now().timestamp() / 60, 0)),
 		}
+	}
+
+	fn check_mwixnet_message(&self) -> Result<(), Error> {
+		if !self
+			.peer_info
+			.capabilities
+			.contains(crate::types::Capabilities::MWIXNET_ROUTE_RELAY)
+		{
+			return Err(Error::UnexpectedMessage);
+		}
+		let minute = Utc::now().timestamp() / 60;
+		let mut rate = self.mwixnet_rate.lock();
+		if rate.0 != minute {
+			*rate = (minute, 0);
+		}
+		if rate.1 >= MAX_MWIXNET_MESSAGES_PER_MINUTE {
+			return Err(Error::BadMessage);
+		}
+		rate.1 += 1;
+		Ok(())
+	}
+
+	fn check_mwixnet_offer_message(&self) -> Result<(), Error> {
+		if !self
+			.peer_info
+			.capabilities
+			.contains(crate::types::Capabilities::MWIXNET_OFFER_RELAY)
+		{
+			return Err(Error::UnexpectedMessage);
+		}
+		let minute = Utc::now().timestamp() / 60;
+		let mut rate = self.mwixnet_rate.lock();
+		if rate.0 != minute {
+			*rate = (minute, 0);
+		}
+		if rate.1 >= MAX_MWIXNET_MESSAGES_PER_MINUTE {
+			return Err(Error::BadMessage);
+		}
+		rate.1 += 1;
+		Ok(())
 	}
 }
 
@@ -233,6 +284,119 @@ impl MessageHandler for Protocol {
 					&segment.headers,
 					&self.peer_info,
 				)?;
+				Consumed::None
+			}
+
+			Message::GetMwixnetRoutes(request) => {
+				self.check_mwixnet_message()?;
+				if request.request_id == 0 {
+					return Err(Error::BadMessage);
+				}
+				let (next_cursor, items) = adapter.mwixnet_routes(request.cursor, request.limit)?;
+				Consumed::Response(Msg::new(
+					Type::MwixnetRoutes,
+					mwixnet_protocol::MwixnetRoutes {
+						version: mwixnet_protocol::MWIXNET_PROTOCOL_VERSION,
+						request_id: request.request_id,
+						next_cursor,
+						items,
+					},
+					self.peer_info.version,
+				)?)
+			}
+
+			Message::MwixnetRoutes(routes) => {
+				self.check_mwixnet_message()?;
+				if routes.request_id == 0 {
+					return Err(Error::BadMessage);
+				}
+				{
+					let mut pending = self.mwixnet_request_id.lock();
+					if *pending != Some(routes.request_id) {
+						return Err(Error::UnexpectedMessage);
+					}
+					*pending = None;
+				}
+				let next_cursor = routes.next_cursor;
+				for item in routes.items {
+					adapter.mwixnet_route_received(item, &self.peer_info)?;
+				}
+				if let Some(cursor) = next_cursor {
+					adapter.request_mwixnet_routes(self.peer_info.addr, Some(cursor))?;
+				}
+				Consumed::None
+			}
+
+			Message::MwixnetRouteAnnouncement(item) => {
+				self.check_mwixnet_message()?;
+				adapter.mwixnet_route_received(
+					mwixnet_protocol::RouteRelayItem::Announcement(item),
+					&self.peer_info,
+				)?;
+				Consumed::None
+			}
+
+			Message::MwixnetRouteStatus(item) => {
+				self.check_mwixnet_message()?;
+				adapter.mwixnet_route_received(
+					mwixnet_protocol::RouteRelayItem::Status(item),
+					&self.peer_info,
+				)?;
+				Consumed::None
+			}
+
+			Message::MwixnetRouteRevocation(item) => {
+				self.check_mwixnet_message()?;
+				adapter.mwixnet_route_received(
+					mwixnet_protocol::RouteRelayItem::Revocation(item),
+					&self.peer_info,
+				)?;
+				Consumed::None
+			}
+
+			Message::GetMwixnetOffers(request) => {
+				self.check_mwixnet_offer_message()?;
+				if request.request_id == 0 {
+					return Err(Error::BadMessage);
+				}
+				let (next_cursor, items) = adapter.mwixnet_offers(request.cursor, request.limit)?;
+				Consumed::Response(Msg::new(
+					Type::MwixnetOffers,
+					mwixnet_protocol::MwixnetOffers {
+						version: mwixnet_protocol::MWIXNET_PROTOCOL_VERSION,
+						request_id: request.request_id,
+						next_cursor,
+						items,
+					},
+					self.peer_info.version,
+				)?)
+			}
+
+			Message::MwixnetOffers(offers) => {
+				self.check_mwixnet_offer_message()?;
+				if offers.request_id == 0 {
+					return Err(Error::BadMessage);
+				}
+				{
+					let mut pending = self.mwixnet_offer_request_id.lock();
+					if *pending != Some(offers.request_id) {
+						return Err(Error::UnexpectedMessage);
+					}
+					*pending = None;
+				}
+				let next_cursor = offers.next_cursor;
+				for item in offers.items {
+					adapter.mwixnet_offer_received(item, &self.peer_info)?;
+				}
+				if let Some(cursor) = next_cursor {
+					adapter.request_mwixnet_offers(self.peer_info.addr, Some(cursor))?;
+				}
+				Consumed::None
+			}
+
+			Message::MwixnetOfferAnnouncement(item) => {
+				self.check_mwixnet_offer_message()?;
+				adapter.mwixnet_offer_received(item, &self.peer_info)?;
 				Consumed::None
 			}
 
@@ -497,9 +661,11 @@ mod tests {
 	fn get_header_segment_returns_header_segment_response() {
 		global::set_local_chain_type(global::ChainTypes::AutomatedTesting);
 		let protocol = Protocol::new(
-			Arc::new(DummyAdapter {}),
+			Arc::new(DummyAdapter::default()),
 			test_peer_info(Capabilities::default()),
 			Arc::new(AtomicBool::new(false)),
+			Arc::new(Mutex::new(None)),
+			Arc::new(Mutex::new(None)),
 		);
 		let identifier = SegmentIdentifier {
 			height: PIHD_HEADER_SEGMENT_HEIGHT,
@@ -530,9 +696,11 @@ mod tests {
 	#[test]
 	fn get_header_segment_requires_pihd_capability() {
 		let protocol = Protocol::new(
-			Arc::new(DummyAdapter {}),
+			Arc::new(DummyAdapter::default()),
 			test_peer_info(Capabilities::HEADER_HIST),
 			Arc::new(AtomicBool::new(false)),
+			Arc::new(Mutex::new(None)),
+			Arc::new(Mutex::new(None)),
 		);
 
 		let consumed = protocol
@@ -543,5 +711,27 @@ mod tests {
 			.expect("get header segment handling");
 
 		assert!(matches!(consumed, Consumed::None));
+	}
+
+	#[test]
+	fn mwixnet_offer_requests_require_nonzero_id() {
+		let protocol = Protocol::new(
+			Arc::new(DummyAdapter::default()),
+			test_peer_info(Capabilities::MWIXNET_OFFER_RELAY),
+			Arc::new(AtomicBool::new(false)),
+			Arc::new(Mutex::new(None)),
+			Arc::new(Mutex::new(None)),
+		);
+
+		let result = protocol.consume(Message::GetMwixnetOffers(
+			mwixnet_protocol::GetMwixnetOffers {
+				version: mwixnet_protocol::MWIXNET_PROTOCOL_VERSION,
+				request_id: 0,
+				cursor: None,
+				limit: 1,
+			},
+		));
+
+		assert!(matches!(result, Err(Error::BadMessage)));
 	}
 }

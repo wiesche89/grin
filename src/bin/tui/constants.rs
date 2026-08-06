@@ -22,6 +22,11 @@ pub const VIEW_BASIC_STATUS: &str = "basic_status_view";
 pub const VIEW_PEER_SYNC: &str = "peer_sync_view";
 pub const TABLE_PEER_STATUS: &str = "peer_status_table";
 
+// MWixnet View
+pub const VIEW_MWIXNET: &str = "mwixnet_view";
+pub const MWIXNET_ROUTES: &str = "mwixnet_routes";
+pub const MWIXNET_SCROLL: &str = "mwixnet_scroll";
+
 // Mining View
 pub const VIEW_MINING: &str = "mining_view";
 pub const SUBMENU_MINING_BUTTON: &str = "mining_submenu_button";

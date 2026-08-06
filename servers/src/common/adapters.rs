@@ -95,6 +95,7 @@ where
 	pihd_header_cache: RwLock<Vec<PihdHeaderSegmentCacheEntry>>,
 	pihd_header_cache_anchor: RwLock<Option<PihdHeaderCacheAnchor>>,
 	header_segment_requests: RwLock<HashMap<SocketAddr, (DateTime<Utc>, usize)>>,
+	mwixnet_routes: Arc<p2p::RouteCache>,
 	tx: mpsc::SyncSender<NetAdapterWorkerMessage>,
 }
 
@@ -754,6 +755,82 @@ where
 			None => Ok(HeaderSegmentAcceptance::Accepted),
 		}
 	}
+
+	fn mwixnet_routes(
+		&self,
+		cursor: Option<p2p::mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<p2p::mwixnet_protocol::Hash>,
+			Vec<p2p::mwixnet_protocol::RouteRelayItem>,
+		),
+		chain::Error,
+	> {
+		self.mwixnet_routes
+			.page(cursor, limit)
+			.map_err(|error| chain::Error::Other(format!("MWixnet route cache: {:?}", error)))
+	}
+
+	fn mwixnet_route_received(
+		&self,
+		item: p2p::mwixnet_protocol::RouteRelayItem,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		match self
+			.mwixnet_routes
+			.insert(item.clone(), Some(peer_info.addr))
+		{
+			Ok(true) => {
+				self.peers()
+					.broadcast_mwixnet_route(&item, Some(peer_info.addr));
+				Ok(true)
+			}
+			Ok(false) | Err(p2p::RouteCacheError::RateLimited) => Ok(false),
+			Err(error) => Err(chain::Error::Other(format!(
+				"invalid MWixnet route: {:?}",
+				error
+			))),
+		}
+	}
+
+	fn mwixnet_offers(
+		&self,
+		cursor: Option<p2p::mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<p2p::mwixnet_protocol::Hash>,
+			Vec<p2p::mwixnet_protocol::OfferAnnouncement>,
+		),
+		chain::Error,
+	> {
+		self.mwixnet_routes
+			.offer_page(cursor, limit)
+			.map_err(|error| chain::Error::Other(format!("MWixnet offer cache: {:?}", error)))
+	}
+
+	fn mwixnet_offer_received(
+		&self,
+		item: p2p::mwixnet_protocol::OfferAnnouncement,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		match self
+			.mwixnet_routes
+			.insert_offer(item.clone(), Some(peer_info.addr))
+		{
+			Ok(true) => {
+				self.peers()
+					.broadcast_mwixnet_offer(&item, Some(peer_info.addr));
+				Ok(true)
+			}
+			Ok(false) | Err(p2p::RouteCacheError::RateLimited) => Ok(false),
+			Err(error) => Err(chain::Error::Other(format!(
+				"invalid MWixnet offer: {:?}",
+				error
+			))),
+		}
+	}
 }
 
 impl<B, P> NetToChainAdapter<B, P>
@@ -768,6 +845,7 @@ where
 		tx_pool: Arc<RwLock<pool::TransactionPool<B, P>>>,
 		config: ServerConfig,
 		hooks: Vec<Box<dyn NetEvents + Send + Sync>>,
+		mwixnet_routes: Arc<p2p::RouteCache>,
 	) -> Self {
 		let (tx, rx) = mpsc::sync_channel(WORKER_CHANNEL_BUFFER_SIZE);
 		let adapter = NetToChainAdapter {
@@ -780,6 +858,7 @@ where
 			pihd_header_cache: RwLock::new(vec![]),
 			pihd_header_cache_anchor: RwLock::new(None),
 			header_segment_requests: RwLock::new(HashMap::new()),
+			mwixnet_routes,
 			tx,
 		};
 		adapter.spawn_net_adapter_worker(Arc::downgrade(&chain), rx);

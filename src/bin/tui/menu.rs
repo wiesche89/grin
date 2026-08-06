@@ -25,8 +25,8 @@ use cursive::views::{
 use cursive::Cursive;
 
 use crate::tui::constants::{
-	MAIN_MENU, ROOT_STACK, SUBMENU_MINING_BUTTON, VIEW_BASIC_STATUS, VIEW_LOGS, VIEW_MINING,
-	VIEW_PEER_SYNC, VIEW_VERSION,
+	MAIN_MENU, MWIXNET_SCROLL, ROOT_STACK, SUBMENU_MINING_BUTTON, VIEW_BASIC_STATUS, VIEW_LOGS,
+	VIEW_MINING, VIEW_MWIXNET, VIEW_PEER_SYNC, VIEW_VERSION,
 };
 
 pub fn create() -> impl View {
@@ -37,6 +37,7 @@ pub fn create() -> impl View {
 	main_menu
 		.get_mut()
 		.add_item("Peers and Sync", VIEW_PEER_SYNC);
+	main_menu.get_mut().add_item("MWixnet", VIEW_MWIXNET);
 	main_menu.get_mut().add_item("Mining", VIEW_MINING);
 	main_menu.get_mut().add_item("Logs", VIEW_LOGS);
 	main_menu.get_mut().add_item("Version Info", VIEW_VERSION);
@@ -57,6 +58,8 @@ pub fn create() -> impl View {
 		.set_on_submit(|c: &mut Cursive, v: &str| {
 			if v == VIEW_MINING {
 				let _ = c.focus_name(SUBMENU_MINING_BUTTON);
+			} else if v == VIEW_MWIXNET {
+				let _ = c.focus_name(MWIXNET_SCROLL);
 			}
 		});
 	let main_menu = OnEventView::new(main_menu)

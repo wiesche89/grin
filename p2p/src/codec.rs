@@ -275,6 +275,14 @@ fn decode_message(
 		Type::KernelSegment => Message::KernelSegment(msg.body()?),
 		Type::GetHeaderSegment => Message::GetHeaderSegment(msg.body()?),
 		Type::HeaderSegment => Message::HeaderSegment(msg.body()?),
+		Type::GetMwixnetRoutes => Message::GetMwixnetRoutes(msg.body()?),
+		Type::MwixnetRoutes => Message::MwixnetRoutes(msg.body()?),
+		Type::MwixnetRouteAnnouncement => Message::MwixnetRouteAnnouncement(msg.body()?),
+		Type::MwixnetRouteStatus => Message::MwixnetRouteStatus(msg.body()?),
+		Type::MwixnetRouteRevocation => Message::MwixnetRouteRevocation(msg.body()?),
+		Type::GetMwixnetOffers => Message::GetMwixnetOffers(msg.body()?),
+		Type::MwixnetOffers => Message::MwixnetOffers(msg.body()?),
+		Type::MwixnetOfferAnnouncement => Message::MwixnetOfferAnnouncement(msg.body()?),
 		Type::Error | Type::Hand | Type::Shake | Type::Headers => {
 			return Err(Error::UnexpectedMessage)
 		}

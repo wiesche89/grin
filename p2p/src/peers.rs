@@ -46,6 +46,8 @@ pub struct Peers {
 	store: PeerStore,
 	peers: RwLock<HashMap<PeerAddr, Arc<Peer>>>,
 	blocked: RwLock<HashMap<PeerAddr, (DateTime<Utc>, u32)>>,
+	last_mwixnet_route_sync: RwLock<DateTime<Utc>>,
+	last_mwixnet_offer_sync: RwLock<DateTime<Utc>>,
 	config: P2PConfig,
 }
 
@@ -57,6 +59,8 @@ impl Peers {
 			config,
 			peers: RwLock::new(HashMap::new()),
 			blocked: RwLock::new(HashMap::new()),
+			last_mwixnet_route_sync: RwLock::new(Utc::now() - Duration::minutes(5)),
+			last_mwixnet_offer_sync: RwLock::new(Utc::now() - Duration::minutes(5)),
 		}
 	}
 
@@ -288,6 +292,34 @@ impl Peers {
 		);
 	}
 
+	pub fn broadcast_mwixnet_route(
+		&self,
+		item: &mwixnet_protocol::RouteRelayItem,
+		source: Option<PeerAddr>,
+	) {
+		self.broadcast("MWixnet route", |peer| {
+			if source == Some(peer.info.addr) {
+				Ok(false)
+			} else {
+				peer.send_mwixnet_route(item)
+			}
+		});
+	}
+
+	pub fn broadcast_mwixnet_offer(
+		&self,
+		item: &mwixnet_protocol::OfferAnnouncement,
+		source: Option<PeerAddr>,
+	) {
+		self.broadcast("MWixnet offer", |peer| {
+			if source == Some(peer.info.addr) {
+				Ok(false)
+			} else {
+				peer.send_mwixnet_offer(item)
+			}
+		});
+	}
+
 	/// Ping all our connected peers. Always automatically expects a pong back
 	/// or disconnects. This acts as a liveness test.
 	pub fn check_all(&self, total_difficulty: Difficulty, height: u64) {
@@ -305,6 +337,39 @@ impl Peers {
 				let _ = self.update_state(p.info.addr, State::Defunct);
 				p.stop("ping error");
 				peers.remove(&p.info.addr);
+			}
+		}
+		let now = Utc::now();
+		{
+			let mut last_route_sync = self.last_mwixnet_route_sync.write();
+			if now - *last_route_sync >= Duration::minutes(5) {
+				if let Some(peer) = self
+					.iter()
+					.connected()
+					.with_capabilities(Capabilities::MWIXNET_ROUTE_RELAY)
+					.into_iter()
+					.next()
+				{
+					if peer.send_mwixnet_route_request(None).unwrap_or(false) {
+						*last_route_sync = now + Duration::seconds(thread_rng().gen_range(-30, 31));
+					}
+				}
+			}
+		}
+		{
+			let mut last_offer_sync = self.last_mwixnet_offer_sync.write();
+			if now - *last_offer_sync >= Duration::minutes(5) {
+				if let Some(peer) = self
+					.iter()
+					.connected()
+					.with_capabilities(Capabilities::MWIXNET_OFFER_RELAY)
+					.into_iter()
+					.next()
+				{
+					if peer.send_mwixnet_offer_request(None).unwrap_or(false) {
+						*last_offer_sync = now + Duration::seconds(thread_rng().gen_range(-30, 31));
+					}
+				}
 			}
 		}
 	}
@@ -888,9 +953,75 @@ impl ChainAdapter for Peers {
 			}
 		}
 	}
+
+	fn mwixnet_routes(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::RouteRelayItem>,
+		),
+		chain::Error,
+	> {
+		self.adapter.mwixnet_routes(cursor, limit)
+	}
+
+	fn mwixnet_route_received(
+		&self,
+		item: mwixnet_protocol::RouteRelayItem,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		self.adapter.mwixnet_route_received(item, peer_info)
+	}
+
+	fn mwixnet_offers(
+		&self,
+		cursor: Option<mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		(
+			Option<mwixnet_protocol::Hash>,
+			Vec<mwixnet_protocol::OfferAnnouncement>,
+		),
+		chain::Error,
+	> {
+		self.adapter.mwixnet_offers(cursor, limit)
+	}
+
+	fn mwixnet_offer_received(
+		&self,
+		item: mwixnet_protocol::OfferAnnouncement,
+		peer_info: &PeerInfo,
+	) -> Result<bool, chain::Error> {
+		self.adapter.mwixnet_offer_received(item, peer_info)
+	}
 }
 
 impl NetAdapter for Peers {
+	fn request_mwixnet_routes(
+		&self,
+		peer: PeerAddr,
+		cursor: Option<mwixnet_protocol::Hash>,
+	) -> Result<(), Error> {
+		self.get_connected_peer(peer)
+			.ok_or(Error::PeerNotFound)?
+			.send_mwixnet_route_request(cursor)
+			.map(|_| ())
+	}
+
+	fn request_mwixnet_offers(
+		&self,
+		peer: PeerAddr,
+		cursor: Option<mwixnet_protocol::Hash>,
+	) -> Result<(), Error> {
+		self.get_connected_peer(peer)
+			.ok_or(Error::PeerNotFound)?
+			.send_mwixnet_offer_request(cursor)
+			.map(|_| ())
+	}
+
 	/// Find good peers we know with the provided capability and return their
 	/// addresses.
 	fn find_peer_addrs(&self, capab: Capabilities) -> Vec<PeerAddr> {

@@ -67,6 +67,12 @@ pub struct ServerStats {
 	pub tx_stats: Option<TxStats>,
 	/// Disk usage in GB
 	pub disk_usage_gb: String,
+	/// Whether MWixnet route relay is enabled
+	pub mwixnet_route_relay: bool,
+	/// MWixnet route relay items
+	pub mwixnet_routes: Vec<p2p::mwixnet_protocol::RouteRelayItem>,
+	/// MWixnet offer announcements
+	pub mwixnet_offers: Vec<p2p::mwixnet_protocol::OfferAnnouncement>,
 }
 
 impl ServerStats {

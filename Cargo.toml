@@ -53,3 +53,7 @@ built = { version = "0.8.0", features = ["git2"]}
 [dev-dependencies]
 grin_chain = { path = "./chain", version = "5.5.1-alpha.0" }
 grin_store = { path = "./store", version = "5.5.1-alpha.0" }
+
+[patch."https://github.com/mimblewimble/grin"]
+grin_core = { path = "./core" }
+grin_util = { path = "./util" }

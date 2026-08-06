@@ -29,7 +29,20 @@ use crate::types::{
 };
 use crate::util::RwLock;
 use crate::{rest::*, BlockListing};
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
+
+fn mwixnet_cache_error(
+	error: crate::p2p::RouteCacheError,
+) -> crate::p2p::mwixnet_protocol::ProtocolRpcError {
+	use crate::p2p::mwixnet_protocol::{ProtocolErrorCode, ProtocolRpcError};
+	let code = match error {
+		crate::p2p::RouteCacheError::Disabled => ProtocolErrorCode::RouteUnknown,
+		crate::p2p::RouteCacheError::Invalid => ProtocolErrorCode::InvalidMwixnetMessage,
+		crate::p2p::RouteCacheError::RateLimited => ProtocolErrorCode::LimitExceeded,
+		crate::p2p::RouteCacheError::Store => ProtocolErrorCode::ServerBusy,
+	};
+	ProtocolRpcError::new(code, format!("MWixnet route cache: {:?}", error))
+}
 
 /// Main interface into all node API functions.
 /// Node APIs are split into two separate blocks of functionality
@@ -44,6 +57,9 @@ where
 	pub chain: Weak<Chain>,
 	pub tx_pool: Weak<RwLock<pool::TransactionPool<B, P>>>,
 	pub sync_state: Weak<SyncState>,
+	pub peers: Weak<crate::p2p::Peers>,
+	pub mwixnet_routes: Arc<crate::p2p::RouteCache>,
+	pub api_caller: crate::p2p::PeerAddr,
 }
 
 impl<B, P> Foreign<B, P>
@@ -65,12 +81,86 @@ where
 		chain: Weak<Chain>,
 		tx_pool: Weak<RwLock<pool::TransactionPool<B, P>>>,
 		sync_state: Weak<SyncState>,
+		peers: Weak<crate::p2p::Peers>,
+		mwixnet_routes: Arc<crate::p2p::RouteCache>,
+		api_caller: crate::p2p::PeerAddr,
 	) -> Self {
 		Foreign {
 			chain,
 			tx_pool,
 			sync_state,
+			peers,
+			mwixnet_routes,
+			api_caller,
 		}
+	}
+
+	pub fn submit_mwixnet_route(
+		&self,
+		item: crate::p2p::mwixnet_protocol::RouteRelayItem,
+	) -> Result<(), crate::p2p::mwixnet_protocol::ProtocolRpcError> {
+		match self
+			.mwixnet_routes
+			.insert_api(item.clone(), self.api_caller)
+		{
+			Ok(true) => {
+				if let Some(peers) = self.peers.upgrade() {
+					peers.broadcast_mwixnet_route(&item, None);
+				}
+				Ok(())
+			}
+			Ok(false) => Ok(()),
+			Err(error) => Err(mwixnet_cache_error(error)),
+		}
+	}
+
+	pub fn get_mwixnet_routes(
+		&self,
+		cursor: Option<crate::p2p::mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		crate::p2p::mwixnet_protocol::NodeRoutePage,
+		crate::p2p::mwixnet_protocol::ProtocolRpcError,
+	> {
+		let (next_cursor, items) = self
+			.mwixnet_routes
+			.page_api(self.api_caller, cursor, limit)
+			.map_err(mwixnet_cache_error)?;
+		Ok(crate::p2p::mwixnet_protocol::NodeRoutePage { next_cursor, items })
+	}
+
+	pub fn submit_mwixnet_offer(
+		&self,
+		item: crate::p2p::mwixnet_protocol::OfferAnnouncement,
+	) -> Result<(), crate::p2p::mwixnet_protocol::ProtocolRpcError> {
+		match self
+			.mwixnet_routes
+			.insert_offer_api(item.clone(), self.api_caller)
+		{
+			Ok(true) => {
+				if let Some(peers) = self.peers.upgrade() {
+					peers.broadcast_mwixnet_offer(&item, None);
+				}
+				Ok(())
+			}
+			Ok(false) => Ok(()),
+			Err(error) => Err(mwixnet_cache_error(error)),
+		}
+	}
+
+	pub fn get_mwixnet_offers(
+		&self,
+		cursor: Option<crate::p2p::mwixnet_protocol::Hash>,
+		limit: u16,
+	) -> Result<
+		crate::p2p::mwixnet_protocol::NodeOfferPage,
+		crate::p2p::mwixnet_protocol::ProtocolRpcError,
+	> {
+		let (next_cursor, items) = self
+			.mwixnet_routes
+			.offer_page_api(self.api_caller, cursor, limit)
+			.map_err(mwixnet_cache_error)?;
+		Ok(crate::p2p::mwixnet_protocol::NodeOfferPage { next_cursor, items })
 	}
 
 	/// Gets block header given either a height, a hash or an unspent output commitment. Only one parameters is needed.

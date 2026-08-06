@@ -17,6 +17,10 @@
 use crate::core::core::hash::Hash;
 use crate::core::core::transaction::Transaction;
 use crate::foreign::Foreign;
+use crate::p2p::mwixnet_protocol::{
+	Hash as MwixnetHash, NodeOfferPage, NodeRoutePage, OfferAnnouncement, ProtocolRpcError,
+	RouteRelayItem,
+};
 use crate::pool::PoolEntry;
 use crate::pool::{BlockChain, PoolAdapter};
 use crate::rest::Error;
@@ -984,6 +988,46 @@ pub trait ForeignRpc: Sync + Send {
 	```
 	 */
 	fn push_transaction(&self, tx: Transaction, fluff: Option<bool>) -> Result<(), Error>;
+
+	/** Submit a validated MWixnet route relay item.
+
+	```text
+	{"jsonrpc":"2.0","method":"submit_mwixnet_route","params":{"item":{...}},"id":1}
+	```
+	*/
+	fn submit_mwixnet_route(&self, item: RouteRelayItem) -> Result<(), ProtocolRpcError>;
+
+	/** Return a page of MWixnet route relay items.
+
+	```text
+	{"jsonrpc":"2.0","method":"get_mwixnet_routes","params":{"cursor":null,"limit":16},"id":1}
+	```
+	*/
+	fn get_mwixnet_routes(
+		&self,
+		cursor: Option<MwixnetHash>,
+		limit: u16,
+	) -> Result<NodeRoutePage, ProtocolRpcError>;
+
+	/** Submit a validated MWixnet server offer.
+
+	```text
+	{"jsonrpc":"2.0","method":"submit_mwixnet_offer","params":{"item":{...}},"id":1}
+	```
+	*/
+	fn submit_mwixnet_offer(&self, item: OfferAnnouncement) -> Result<(), ProtocolRpcError>;
+
+	/** Return a page of MWixnet server offers.
+
+	```text
+	{"jsonrpc":"2.0","method":"get_mwixnet_offers","params":{"cursor":null,"limit":16},"id":1}
+	```
+	*/
+	fn get_mwixnet_offers(
+		&self,
+		cursor: Option<MwixnetHash>,
+		limit: u16,
+	) -> Result<NodeOfferPage, ProtocolRpcError>;
 }
 
 impl<B, P> ForeignRpc for Foreign<B, P>
@@ -1004,6 +1048,30 @@ where
 			parsed_hash = Some(Hash::from_vec(&vec));
 		}
 		Foreign::get_header(self, height, parsed_hash, commit)
+	}
+
+	fn submit_mwixnet_route(&self, item: RouteRelayItem) -> Result<(), ProtocolRpcError> {
+		Foreign::submit_mwixnet_route(self, item)
+	}
+
+	fn get_mwixnet_routes(
+		&self,
+		cursor: Option<MwixnetHash>,
+		limit: u16,
+	) -> Result<NodeRoutePage, ProtocolRpcError> {
+		Foreign::get_mwixnet_routes(self, cursor, limit)
+	}
+
+	fn submit_mwixnet_offer(&self, item: OfferAnnouncement) -> Result<(), ProtocolRpcError> {
+		Foreign::submit_mwixnet_offer(self, item)
+	}
+
+	fn get_mwixnet_offers(
+		&self,
+		cursor: Option<MwixnetHash>,
+		limit: u16,
+	) -> Result<NodeOfferPage, ProtocolRpcError> {
+		Foreign::get_mwixnet_offers(self, cursor, limit)
 	}
 
 	fn get_block(
