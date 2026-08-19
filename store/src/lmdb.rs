@@ -15,6 +15,8 @@
 //! Storage of core types using LMDB.
 
 use heed::types::Bytes;
+#[cfg(target_os = "openbsd")]
+use heed::EnvFlags;
 use heed::{Database, Env, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -196,6 +198,8 @@ impl Store {
 		if !has_env {
 			let env = unsafe {
 				let mut options = EnvOpenOptions::new().read_txn_without_tls();
+				#[cfg(target_os = "openbsd")]
+				options.flags(EnvFlags::WRITE_MAP);
 				let mut env_options = options.max_dbs(24);
 				if let Some(max_readers) = max_readers {
 					env_options = env_options.max_readers(max_readers);
