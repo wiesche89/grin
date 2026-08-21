@@ -952,10 +952,11 @@ where
 		headers: &[BlockHeader],
 		sync_head: chain::Tip,
 	) -> Result<bool, chain::Error> {
+		// PoW is checked while decoding legacy and PIHD headers.
 		match self.chain().sync_block_headers(
 			headers,
 			sync_head,
-			chain::Options::SYNC | chain::Options::POW_VERIFIED,
+			chain::Options::SYNC | chain::Options::POW_VERIFIED_ON_READ,
 		) {
 			Ok(sync_head) => {
 				if let Some(sync_head) = sync_head {
