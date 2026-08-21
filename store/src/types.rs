@@ -622,7 +622,7 @@ where
 	}
 }
 
-#[cfg(all(test, target_os = "openbsd"))]
+#[cfg(test)]
 mod test {
 	use super::*;
 

@@ -147,10 +147,6 @@ jobs:
       - name: Install dependencies
         run: ${{ matrix.install }}
 
-      - name: Store test
-        if: matrix.os == 'openbsd'
-        run: cargo test -p grin_store --lib flush_map
-
       - name: Build
         run: cargo build --release --locked
 
