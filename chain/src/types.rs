@@ -43,6 +43,8 @@ bitflags! {
 		const SYNC = 0b0000_0010;
 		/// Block validation on a block we mined ourselves
 		const MINE = 0b0000_0100;
+		/// Proof of work was verified while reading from the network.
+		const POW_VERIFIED = 0b0000_1000;
 	}
 }
 

@@ -415,7 +415,9 @@ fn validate_header(header: &BlockHeader, ctx: &mut BlockContext<'_>) -> Result<(
 	if !ctx.opts.contains(Options::SKIP_POW) {
 		// Quick check of this header in isolation. No point proceeding if this fails.
 		// We can do this without needing to iterate over previous headers.
-		validate_pow_only(header, ctx)?;
+		if !ctx.opts.contains(Options::POW_VERIFIED) {
+			validate_pow_only(header, ctx)?;
+		}
 
 		if header.total_difficulty() <= prev.total_difficulty() {
 			return Err(Error::DifficultyTooLow);

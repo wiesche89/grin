@@ -1,19 +1,26 @@
 name: Snap Package
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - master
-      - staging
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  BUILD_LABEL: ${{ github.ref_name == 'master' && 'latest' || github.ref_name == 'staging' && 'staging-latest' || github.ref_name }}
 
 jobs:
   build-snap:
-    name: Build snap
+    name: Snap ${{ matrix.arch }}
     strategy:
+      fail-fast: false
       matrix:
-        runs-on: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runs-on }}
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -21,32 +28,36 @@ jobs:
       - name: Prepare snapcraft project
         run: |
           grade=devel
-          if [ "${{ github.ref_name }}" = "master" ]; then
+          if [ "$GITHUB_REF_NAME" = master ] || [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             grade=stable
           fi
-
           mkdir -p snap
           sed "s/SNAP_GRADE/$grade/" .packaging/snaps/snapcraft.yaml > snap/snapcraft.yaml
 
       - name: Build snap package
-        id: build
         uses: snapcore/action-build@v1
         with:
           path: .
 
-      - name: Show snap package
-        run: find . -maxdepth 1 -name "*.snap" -ls
+      - name: Prepare artifact
+        run: |
+          snap=$(find . -maxdepth 1 -name "*.snap" -print -quit)
+          asset=grin-${BUILD_LABEL}-linux-${{ matrix.arch }}.snap
+          mv "$snap" "$asset"
+          openssl sha256 "$asset" > "${asset%.snap}-sha256sum.txt"
 
-      - name: Upload snap artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: grin-snap
-          path: "*.snap"
-          if-no-files-found: error
+          name: snap-${{ matrix.arch }}
+          path: |
+            grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}.snap
+            grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-sha256sum.txt
+          retention-days: 14
 
   telegram-notify:
     name: Telegram Notification
-    needs: [build-snap]
+    needs: build-snap
     if: always()
     uses: ./.github/workflows/telegram.yaml
     secrets: inherit

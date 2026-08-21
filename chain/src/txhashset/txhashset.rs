@@ -29,7 +29,7 @@ use crate::core::global;
 use crate::core::ser::{PMMRable, ProtocolVersion};
 use crate::error::Error;
 use crate::linked_list::{ListIndex, PruneableListIndex, RewindableListIndex};
-use crate::store::{self, Batch, ChainStore};
+use crate::store::{self, Batch, ChainStore, ReadBatch};
 use crate::txhashset::bitmap_accumulator::{BitmapAccumulator, BitmapChunk};
 use crate::txhashset::{RewindableKernelView, UTXOView};
 use crate::types::{CommitPos, OutputRoots, Tip, TxHashSetRoots, TxHashsetWriteStatus};
@@ -212,9 +212,9 @@ impl PMMRHandle<BlockHeader> {
 		output_pos: u64,
 		kernel_pos: u64,
 		from_height: u64,
-		store: Arc<store::ChainStore>,
+		store: &ReadBatch<'_>,
 	) -> Option<BlockHeader> {
-		let mut cur_height = pmmr::round_up_to_leaf_pos(from_height);
+		let mut cur_height = pmmr::insertion_to_pmmr_index(from_height);
 		let header_pmmr = ReadonlyPMMR::at(&self.backend, self.size);
 		let mut candidate: Option<BlockHeader> = None;
 		while let Some(header_entry) = header_pmmr.get_data(cur_height) {
