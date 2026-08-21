@@ -2307,4 +2307,51 @@ mod tests {
 
 		fs::remove_dir_all(dir).unwrap();
 	}
+
+	#[test]
+	fn resume_header() {
+		global::set_local_chain_type(global::ChainTypes::AutomatedTesting);
+
+		let dir = test_dir("resume_header");
+		let store = ChainStore::new(dir.join("db").to_str().unwrap(), None).unwrap();
+		let mut handle =
+			PMMRHandle::<BlockHeader>::new(dir.join("pmmr"), false, ProtocolVersion(1), None)
+				.unwrap();
+		let mut headers = vec![global::get_genesis_block().header];
+
+		for height in 1..=5 {
+			let mut header = BlockHeader::default();
+			header.height = height;
+			header.prev_hash = headers.last().unwrap().hash();
+			*header.pow.proof.nonces.last_mut().unwrap() = height;
+			header.output_mmr_size = if height == 3 || height == 5 {
+				5
+			} else {
+				height
+			};
+			header.kernel_mmr_size = header.output_mmr_size;
+			headers.push(header);
+		}
+
+		let mut batch = store.batch().unwrap();
+		{
+			let mut pmmr = PMMR::at(&mut handle.backend, handle.size);
+			for header in &headers {
+				pmmr.push(header).unwrap();
+				batch.save_block_header(header).unwrap();
+			}
+			handle.size = pmmr.unpruned_size();
+		}
+		handle.backend.sync().unwrap();
+		batch.commit().unwrap();
+
+		let batch = store.read_batch().unwrap();
+		let header = handle.get_first_header_with(4, 4, 4, &batch).unwrap();
+		assert_eq!(header.height, 4);
+
+		drop(batch);
+		drop(store);
+		drop(handle);
+		fs::remove_dir_all(dir).unwrap();
+	}
 }
