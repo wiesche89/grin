@@ -54,17 +54,3 @@ jobs:
             grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}.snap
             grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-sha256sum.txt
           retention-days: 14
-
-  telegram-notify:
-    name: Telegram Notification
-    needs: build-snap
-    if: always()
-    uses: ./.github/workflows/telegram.yaml
-    secrets: inherit
-    with:
-      title: Grin Snap
-      status: ${{ needs.build-snap.result }}
-      details: |
-        <b>Package:</b> ${{ needs.build-snap.result }}
-      artifact_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      commit_message: ${{ github.event.head_commit.message }}
