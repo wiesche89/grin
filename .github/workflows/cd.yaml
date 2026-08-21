@@ -295,13 +295,6 @@ jobs:
 
   docker:
     name: Docker
-    needs:
-      - linux-release
-      - linux-musl
-      - bsd
-      - macos-release-x86
-      - macos-release-arm64
-      - windows-release
     uses: ./.github/workflows/publish-ghcr.yaml
     permissions:
       contents: read
@@ -309,13 +302,6 @@ jobs:
 
   snap:
     name: Snap
-    needs:
-      - linux-release
-      - linux-musl
-      - bsd
-      - macos-release-x86
-      - macos-release-arm64
-      - windows-release
     uses: ./.github/workflows/snap.yaml
     secrets: inherit
 
