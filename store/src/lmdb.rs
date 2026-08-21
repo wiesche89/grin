@@ -813,9 +813,8 @@ impl<'a> Batch<'a> {
 	/// Whether the provided key exists.
 	/// This is in the context of the current write transaction.
 	pub fn exists(&self, db_key: Option<u8>, key: &[u8]) -> Result<bool, Error> {
-		let read = self.write.nested_read_txn()?;
 		let db = self.store.get_db(db_key)?;
-		let res = db.get(&read, key)?;
+		let res = db.get(&self.write, key)?;
 		Ok(res.is_some())
 	}
 
