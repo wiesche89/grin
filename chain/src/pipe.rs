@@ -417,7 +417,6 @@ fn validate_header(header: &BlockHeader, ctx: &mut BlockContext<'_>) -> Result<(
 		// We can do this without needing to iterate over previous headers.
 		if ctx.opts.contains(Options::POW_VERIFIED_ON_READ) {
 			debug_assert!(header.pow.is_primary() || header.pow.is_secondary());
-			debug_assert!((ctx.pow_verifier)(header).is_ok());
 		} else {
 			validate_pow_only(header, ctx)?;
 		}

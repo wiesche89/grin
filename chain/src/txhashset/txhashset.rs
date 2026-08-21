@@ -2320,16 +2320,20 @@ mod tests {
 		let mut headers = vec![global::get_genesis_block().header];
 
 		for height in 1..=5 {
-			let mut header = BlockHeader::default();
-			header.height = height;
-			header.prev_hash = headers.last().unwrap().hash();
-			*header.pow.proof.nonces.last_mut().unwrap() = height;
-			header.output_mmr_size = if height == 3 || height == 5 {
+			// Make an early scan return the wrong header
+			let output_mmr_size = if height == 3 || height == 5 {
 				5
 			} else {
 				height
 			};
-			header.kernel_mmr_size = header.output_mmr_size;
+			let mut header = BlockHeader {
+				height,
+				prev_hash: headers.last().unwrap().hash(),
+				output_mmr_size,
+				kernel_mmr_size: output_mmr_size,
+				..Default::default()
+			};
+			*header.pow.proof.nonces.last_mut().unwrap() = height;
 			headers.push(header);
 		}
 
