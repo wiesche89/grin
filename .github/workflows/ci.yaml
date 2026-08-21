@@ -5,14 +5,10 @@ jobs:
   linux-tests:
     name: Linux Tests
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        job_args: [servers, chain, core, keychain, pool, p2p, src, api, util, store]
     steps:
       - uses: actions/checkout@v6
-      - name: Test ${{ matrix.job_args }}
-        working-directory: ${{ matrix.job_args }}
-        run: cargo test --release
+      - name: Tests
+        run: cargo test --release --all
 
   musl-tests:
     name: Linux musl ${{ matrix.arch }} Tests
