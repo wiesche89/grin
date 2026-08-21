@@ -8,7 +8,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Tests
-        run: cargo test --release --all
+        run: cargo test --release --all --locked
 
   musl-tests:
     name: Linux musl ${{ matrix.arch }} Tests
@@ -39,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Tests
-        run: cargo test --release --all
+        run: cargo test --release --all --locked
 
   windows-tests:
     name: Windows Tests
@@ -50,7 +50,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Tests
-        run: cargo test --release --all
+        run: cargo test --release --all --locked
 
   bsd-tests:
     name: ${{ matrix.name }} Tests
@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 120
     defaults:
       run:
-        shell: cpa.sh {0}
+        shell: cpa.sh {0} --sync-files runner-to-vm
     strategy:
       fail-fast: false
       matrix:
@@ -86,7 +86,7 @@ jobs:
         run: ${{ matrix.install }}
 
       - name: Tests
-        run: cargo test --release --all
+        run: cargo test --release --all --locked
 
   telegram-notify:
     name: Telegram Notification
