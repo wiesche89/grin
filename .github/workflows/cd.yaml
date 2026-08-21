@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Check binary
         run: |
@@ -189,7 +189,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build
-        run: cargo build --release --target x86_64-apple-darwin
+        run: cargo build --release --locked --target x86_64-apple-darwin
 
       - name: Check binary
         run: |
@@ -225,7 +225,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Check binary
         run: |
@@ -263,7 +263,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Check binary
         shell: pwsh
