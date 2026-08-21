@@ -1818,7 +1818,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 [[package]]
 name = "lmdb-master-sys"
 version = "0.2.6"
-source = "git+https://github.com/wiesche89/heed?rev=5e96272597e02d5c0b2f354ce37e3edf08f648a8#5e96272597e02d5c0b2f354ce37e3edf08f648a8"
+source = "git+https://github.com/wiesche89/heed?rev=4c7252128a58819406f2978adfc8d41365e7f77a#4c7252128a58819406f2978adfc8d41365e7f77a"
 dependencies = [
  "cc",
  "doxygen-rs",
