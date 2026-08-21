@@ -2,12 +2,16 @@ name: Snap Package
 
 on:
   workflow_call:
+    inputs:
+      build_label:
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
-  BUILD_LABEL: ${{ github.ref_name == 'master' && 'latest' || github.ref_name == 'staging' && 'staging-latest' || github.ref_name }}
+  BUILD_LABEL: ${{ inputs.build_label }}
 
 jobs:
   build-snap:

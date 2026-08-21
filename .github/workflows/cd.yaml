@@ -306,6 +306,8 @@ jobs:
     name: Snap
     uses: ./.github/workflows/snap.yaml
     secrets: inherit
+    with:
+      build_label: ${{ github.ref_name == 'master' && 'latest' || github.ref_name == 'staging' && 'staging-latest' || github.ref_name }}
 
   release:
     name: Publish release

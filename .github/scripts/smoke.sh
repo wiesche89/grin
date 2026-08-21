@@ -20,6 +20,11 @@ trap 'exit 1' HUP INT TERM
 
 cd "$smoke_dir"
 "$binary" --usernet server config
+api_addr=$(grep '^api_http_addr = ' grin-server.toml | cut -d '"' -f 2)
+if [ -z "$api_addr" ]; then
+	cat grin-server.toml
+	exit 1
+fi
 "$binary" --usernet --no-tui server run >node.log 2>&1 &
 node_pid=$!
 
@@ -36,8 +41,8 @@ while [ "$attempt" -lt 60 ]; do
 			--user "grin:$secret" \
 			--header 'Content-Type: application/json' \
 			--data '{"jsonrpc":"2.0","method":"get_status","params":null,"id":1}' \
-			http://127.0.0.1:23413/v2/owner 2>/dev/null) || true
-		if printf '%s' "$response" | grep -q '"chain": "user"'; then
+			"http://$api_addr/v2/owner" 2>/dev/null) || true
+		if printf '%s' "$response" | tr -d '[:space:]' | grep -q '"chain":"user"'; then
 			printf '%s\n' "$response"
 			exit 0
 		fi
