@@ -53,4 +53,5 @@ jobs:
           path: |
             grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}.snap
             grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-sha256sum.txt
+          if-no-files-found: error
           retention-days: 14

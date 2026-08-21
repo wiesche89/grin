@@ -52,6 +52,7 @@ jobs:
           path: |
             target/release/grin-${{ env.BUILD_LABEL }}-linux-x86_64.tar.gz
             target/release/grin-${{ env.BUILD_LABEL }}-linux-x86_64-sha256sum.txt
+          if-no-files-found: error
           retention-days: 14
 
   linux-musl:
@@ -109,6 +110,7 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-musl.tar.gz
             target/${{ matrix.target }}/release/grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-musl-sha256sum.txt
+          if-no-files-found: error
           retention-days: 14
 
   bsd:
@@ -177,6 +179,7 @@ jobs:
           path: |
             target/release/grin-${{ env.BUILD_LABEL }}-${{ matrix.os }}-x86_64.tar.gz
             target/release/grin-${{ env.BUILD_LABEL }}-${{ matrix.os }}-x86_64-sha256sum.txt
+          if-no-files-found: error
           retention-days: 14
 
   macos-release-x86:
@@ -215,6 +218,7 @@ jobs:
           path: |
             target/x86_64-apple-darwin/release/grin-${{ env.BUILD_LABEL }}-macos-x86_64.tar.gz
             target/x86_64-apple-darwin/release/grin-${{ env.BUILD_LABEL }}-macos-x86_64-sha256sum.txt
+          if-no-files-found: error
           retention-days: 14
 
   macos-release-arm64:
@@ -250,6 +254,7 @@ jobs:
           path: |
             target/release/grin-${{ env.BUILD_LABEL }}-macos-arm64.tar.gz
             target/release/grin-${{ env.BUILD_LABEL }}-macos-arm64-sha256sum.txt
+          if-no-files-found: error
           retention-days: 14
 
   windows-release:
@@ -291,6 +296,7 @@ jobs:
           path: |
             target/release/grin-${{ env.BUILD_LABEL }}-win-x86_64.zip
             target/release/grin-${{ env.BUILD_LABEL }}-win-x86_64-sha256sum.txt
+          if-no-files-found: error
           retention-days: 14
 
   docker:
