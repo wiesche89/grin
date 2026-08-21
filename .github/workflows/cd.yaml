@@ -141,7 +141,6 @@ jobs:
           operating_system: ${{ matrix.os }}
           architecture: x86-64
           version: ${{ matrix.version }}
-          memory: 6G
           cpu_count: 4
 
       - name: Install dependencies
@@ -365,5 +364,7 @@ jobs:
         <b>Windows:</b> ${{ needs['windows-release'].result }}
         <b>Docker:</b> ${{ needs.docker.result }}
         <b>Snap:</b> ${{ needs.snap.result }}
+        <b>Release:</b> ${{ needs.release.result }}
+      image_tag: ${{ needs.docker.outputs.image_tag }}
       artifact_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       commit_message: ${{ github.event.head_commit.message }}

@@ -32,7 +32,9 @@ jobs:
       - name: Prepare snapcraft project
         run: |
           grade=devel
-          if [ "$GITHUB_REF_NAME" = master ] || [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [ "$GITHUB_REF_NAME" = master ]; then
+            grade=stable
+          elif [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != *-* ]]; then
             grade=stable
           fi
           mkdir -p snap
@@ -48,7 +50,7 @@ jobs:
           snap=$(find . -maxdepth 1 -name "*.snap" -print -quit)
           asset=grin-${BUILD_LABEL}-linux-${{ matrix.arch }}.snap
           mv "$snap" "$asset"
-          openssl sha256 "$asset" > "${asset%.snap}-sha256sum.txt"
+          openssl sha256 "$asset" > "${asset}-sha256sum.txt"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -56,6 +58,6 @@ jobs:
           name: snap-${{ matrix.arch }}
           path: |
             grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}.snap
-            grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}-sha256sum.txt
+            grin-${{ env.BUILD_LABEL }}-linux-${{ matrix.arch }}.snap-sha256sum.txt
           if-no-files-found: error
           retention-days: 14
