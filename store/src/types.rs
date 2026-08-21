@@ -356,6 +356,7 @@ where
 	pub fn flush(&mut self) -> io::Result<()> {
 		#[cfg(target_os = "openbsd")]
 		{
+			// Refresh the mapping after writes on OpenBSD
 			self.mmap = None;
 		}
 
