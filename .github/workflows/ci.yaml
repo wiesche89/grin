@@ -69,7 +69,7 @@ jobs:
           - name: OpenBSD
             os: openbsd
             version: "7.9"
-            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || 'ubuntu-24.04' }}
+            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-openbsd' || 'ubuntu-24.04' }}
             memory: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && '12G' || '6G' }}
             install: sudo pkg_add rust git cmake pkgconf gmake curl
             host: 192.168.178.146
@@ -78,7 +78,7 @@ jobs:
           - name: FreeBSD
             os: freebsd
             version: "14.4"
-            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || 'ubuntu-24.04' }}
+            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-freebsd' || 'ubuntu-24.04' }}
             memory: 6G
             install: sudo pkg install -y rust git cmake pkgconf gmake curl
             host: 192.168.178.147
