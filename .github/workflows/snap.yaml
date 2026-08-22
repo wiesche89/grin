@@ -24,7 +24,7 @@ jobs:
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
-    runs-on: ${{ github.repository == 'wiesche89/grin' && matrix.arch == 'x86_64' && 'grin-snap' || matrix.runner }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && matrix.arch == 'x86_64' && 'snap-x64' || matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6

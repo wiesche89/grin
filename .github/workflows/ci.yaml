@@ -4,7 +4,7 @@ on: [push, pull_request]
 jobs:
   linux-tests:
     name: Linux Tests
-    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-linux' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'linux-gnu-x64' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
       - name: Tests
@@ -12,7 +12,7 @@ jobs:
 
   musl-tests:
     name: Linux musl ${{ matrix.arch }} Tests
-    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && matrix.arch == 'x86_64' && 'grin-build' || matrix.runner }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && matrix.arch == 'x86_64' && 'linux-musl-x64' || matrix.runner }}
     container:
       image: ${{ matrix.image }}
     strategy:
@@ -43,7 +43,7 @@ jobs:
 
   windows-tests:
     name: Windows Tests
-    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-windows' || 'windows-2022' }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'windows-x64' || 'windows-2022' }}
     env:
       ROARING_ARCH: x86-64-v2
     steps:
@@ -69,7 +69,7 @@ jobs:
           - name: OpenBSD
             os: openbsd
             version: "7.9"
-            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-openbsd' || 'ubuntu-24.04' }}
+            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'openbsd-x64' || 'ubuntu-24.04' }}
             memory: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && '12G' || '6G' }}
             install: sudo pkg_add rust git cmake pkgconf gmake curl
             host: 192.168.178.146
@@ -78,7 +78,7 @@ jobs:
           - name: FreeBSD
             os: freebsd
             version: "14.4"
-            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-freebsd' || 'ubuntu-24.04' }}
+            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'freebsd-x64' || 'ubuntu-24.04' }}
             memory: 6G
             install: sudo pkg install -y rust git cmake pkgconf gmake curl
             host: 192.168.178.147

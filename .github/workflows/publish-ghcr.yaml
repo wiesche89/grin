@@ -25,7 +25,7 @@ jobs:
             runner: ubuntu-latest
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
-    runs-on: ${{ github.repository == 'wiesche89/grin' && matrix.platform == 'linux/amd64' && 'grin-build' || matrix.runner }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && matrix.platform == 'linux/amd64' && 'docker-x64' || matrix.runner }}
     name: Build Docker image for ${{ matrix.platform }}
     steps:
       - name: Prepare
