@@ -4,7 +4,7 @@ on: [push, pull_request]
 jobs:
   linux-tests:
     name: Linux Tests
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
       - name: Tests
@@ -12,7 +12,7 @@ jobs:
 
   musl-tests:
     name: Linux musl ${{ matrix.arch }} Tests
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || matrix.runner }}
     container:
       image: ${{ matrix.image }}
     strategy:
@@ -43,7 +43,7 @@ jobs:
 
   windows-tests:
     name: Windows Tests
-    runs-on: windows-2022
+    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-windows' || 'windows-2022' }}
     env:
       ROARING_ARCH: x86-64-v2
     steps:
@@ -72,17 +72,23 @@ jobs:
             runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || 'ubuntu-24.04' }}
             memory: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && '12G' || '6G' }}
             install: sudo pkg_add rust git cmake pkgconf gmake curl
+            host: 192.168.178.146
+            key: openbsd_ci
+            test: ulimit -n 1024 && cargo test --release --all --locked -- --test-threads=1
           - name: FreeBSD
             os: freebsd
             version: "14.4"
-            runner: ubuntu-24.04
+            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || 'ubuntu-24.04' }}
             memory: 6G
             install: sudo pkg install -y rust git cmake pkgconf gmake curl
+            host: 192.168.178.147
+            key: freebsd_ci
+            test: cargo test --release --all --locked
     steps:
       - uses: actions/checkout@v6
 
       - name: Start ${{ matrix.name }}
-        if: matrix.name != 'OpenBSD' || github.repository != 'wiesche89/grin' || github.event_name != 'push'
+        if: github.repository != 'wiesche89/grin' || github.event_name != 'push'
         uses: cross-platform-actions/action@v1.3.0
         with:
           operating_system: ${{ matrix.os }}
@@ -92,19 +98,19 @@ jobs:
           memory: ${{ matrix.memory }}
 
       - name: Install dependencies
-        if: matrix.name != 'OpenBSD' || github.repository != 'wiesche89/grin' || github.event_name != 'push'
+        if: github.repository != 'wiesche89/grin' || github.event_name != 'push'
         run: ${{ matrix.install }}
 
       - name: Tests
-        if: matrix.name != 'OpenBSD' || github.repository != 'wiesche89/grin' || github.event_name != 'push'
+        if: github.repository != 'wiesche89/grin' || github.event_name != 'push'
         run: cargo test --release --all --locked
 
-      - name: Tests on OpenBSD VM
-        if: matrix.name == 'OpenBSD' && github.repository == 'wiesche89/grin' && github.event_name == 'push'
+      - name: Tests on ${{ matrix.name }} VM
+        if: github.repository == 'wiesche89/grin' && github.event_name == 'push'
         shell: bash
         run: |
-          ssh -i ~/.ssh/openbsd_ci runner@192.168.178.146 \
-            "cd /home/runner/grin && git fetch --quiet origin $GITHUB_SHA && git checkout --quiet --force --detach $GITHUB_SHA && ulimit -n 1024 && cargo test --release --all --locked -- --test-threads=1"
+          ssh -i ~/.ssh/${{ matrix.key }} runner@${{ matrix.host }} \
+            "cd /home/runner/grin && git fetch --quiet origin $GITHUB_SHA && git checkout --quiet --force --detach $GITHUB_SHA && ${{ matrix.test }}"
 
   telegram-notify:
     name: Telegram Notification
