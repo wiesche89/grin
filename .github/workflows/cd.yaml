@@ -22,7 +22,7 @@ concurrency:
 jobs:
   linux-release:
     name: Linux Release
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.repository == 'wiesche89/grin' && 'grin-linux' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -57,7 +57,7 @@ jobs:
 
   linux-musl:
     name: Linux musl ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && matrix.arch == 'x86_64' && 'grin-build' || matrix.runner }}
     container:
       image: ${{ matrix.image }}
     strategy:
@@ -115,7 +115,7 @@ jobs:
 
   bsd:
     name: ${{ matrix.name }} x86_64
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     defaults:
       run:
@@ -127,15 +127,22 @@ jobs:
           - name: OpenBSD
             os: openbsd
             version: "7.9"
+            runner: ${{ github.repository == 'wiesche89/grin' && 'grin-openbsd' || 'ubuntu-24.04' }}
             install: sudo pkg_add rust git cmake pkgconf gmake curl
+            host: 192.168.178.146
+            key: openbsd_ci
           - name: FreeBSD
             os: freebsd
             version: "14.4"
+            runner: ${{ github.repository == 'wiesche89/grin' && 'grin-freebsd' || 'ubuntu-24.04' }}
             install: sudo pkg install -y rust git cmake pkgconf gmake curl
+            host: 192.168.178.147
+            key: freebsd_ci
     steps:
       - uses: actions/checkout@v6
 
       - name: Start ${{ matrix.name }}
+        if: github.repository != 'wiesche89/grin'
         uses: cross-platform-actions/action@v1.3.0
         with:
           operating_system: ${{ matrix.os }}
@@ -144,28 +151,65 @@ jobs:
           cpu_count: 4
 
       - name: Install dependencies
+        if: github.repository != 'wiesche89/grin'
         run: ${{ matrix.install }}
 
       - name: Build
+        if: github.repository != 'wiesche89/grin'
         run: cargo build --release --locked
 
       - name: Check binary
+        if: github.repository != 'wiesche89/grin'
         run: |
           file target/release/grin
           target/release/grin --version
 
       - name: Smoke test
+        if: github.repository != 'wiesche89/grin'
         run: sh .github/scripts/smoke.sh "$PWD/target/release/grin"
 
       - name: Archive
+        if: github.repository != 'wiesche89/grin'
         run: |
           cd target/release
           tar -czf grin-${{ env.BUILD_LABEL }}-${{ matrix.os }}-x86_64.tar.gz grin
 
       - name: Create checksum
+        if: github.repository != 'wiesche89/grin'
         run: |
           cd target/release
           openssl sha256 grin-${{ env.BUILD_LABEL }}-${{ matrix.os }}-x86_64.tar.gz > grin-${{ env.BUILD_LABEL }}-${{ matrix.os }}-x86_64-sha256sum.txt
+
+      - name: Build on ${{ matrix.name }} VM
+        if: github.repository == 'wiesche89/grin'
+        shell: bash
+        run: |
+          ssh -i ~/.ssh/${{ matrix.key }} runner@${{ matrix.host }} \
+            sh -s -- "$GITHUB_SHA" "$BUILD_LABEL" "${{ matrix.os }}" <<'EOF'
+          set -e
+          commit=$1
+          label=$2
+          os=$3
+          cd /home/runner/grin
+          git fetch --quiet origin "$commit"
+          git checkout --quiet --force --detach "$commit"
+          if [ "$os" = openbsd ]; then
+            ulimit -n 1024
+          fi
+          cargo build --release --locked
+          file target/release/grin
+          target/release/grin --version
+          sh .github/scripts/smoke.sh "$PWD/target/release/grin"
+          cd target/release
+          archive=grin-${label}-${os}-x86_64.tar.gz
+          tar -czf "$archive" grin
+          openssl sha256 "$archive" > "grin-${label}-${os}-x86_64-sha256sum.txt"
+          EOF
+          mkdir -p target/release
+          scp -i ~/.ssh/${{ matrix.key }} \
+            runner@${{ matrix.host }}:/home/runner/grin/target/release/grin-${BUILD_LABEL}-${{ matrix.os }}-x86_64.tar.gz \
+            runner@${{ matrix.host }}:/home/runner/grin/target/release/grin-${BUILD_LABEL}-${{ matrix.os }}-x86_64-sha256sum.txt \
+            target/release/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -254,7 +298,7 @@ jobs:
 
   windows-release:
     name: Windows Release
-    runs-on: windows-2022
+    runs-on: ${{ github.repository == 'wiesche89/grin' && 'grin-windows' || 'windows-2022' }}
     env:
       ROARING_ARCH: x86-64-v2
     steps:
@@ -265,7 +309,7 @@ jobs:
         run: cargo build --release --locked
 
       - name: Check binary
-        shell: pwsh
+        shell: powershell
         run: |
           Get-Item target/release/grin.exe
           target/release/grin.exe --version
@@ -276,12 +320,12 @@ jobs:
 
       - name: Archive
         working-directory: target/release
-        shell: pwsh
+        shell: powershell
         run: Compress-Archive -Path grin.exe -DestinationPath grin-${{ env.BUILD_LABEL }}-win-x86_64.zip
 
       - name: Create checksum
         working-directory: target/release
-        shell: pwsh
+        shell: powershell
         run: Get-FileHash -Algorithm SHA256 grin-${{ env.BUILD_LABEL }}-win-x86_64.zip | Format-List | Out-String | ForEach-Object { $_.Trim() } > grin-${{ env.BUILD_LABEL }}-win-x86_64-sha256sum.txt
 
       - name: Upload artifact
