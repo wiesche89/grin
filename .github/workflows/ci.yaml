@@ -54,7 +54,7 @@ jobs:
 
   bsd-tests:
     name: ${{ matrix.name }} Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     defaults:
       run:
@@ -66,10 +66,14 @@ jobs:
           - name: OpenBSD
             os: openbsd
             version: "7.9"
+            runner: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || 'ubuntu-24.04' }}
+            memory: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && '12G' || '6G' }}
             install: sudo pkg_add rust git cmake pkgconf gmake curl
           - name: FreeBSD
             os: freebsd
             version: "14.4"
+            runner: ubuntu-24.04
+            memory: 6G
             install: sudo pkg install -y rust git cmake pkgconf gmake curl
     steps:
       - uses: actions/checkout@v6
@@ -81,6 +85,7 @@ jobs:
           architecture: x86-64
           version: ${{ matrix.version }}
           cpu_count: 4
+          memory: ${{ matrix.memory }}
 
       - name: Install dependencies
         run: ${{ matrix.install }}
