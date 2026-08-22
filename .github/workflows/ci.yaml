@@ -12,7 +12,7 @@ jobs:
 
   musl-tests:
     name: Linux musl ${{ matrix.arch }} Tests
-    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && 'grin-build' || matrix.runner }}
+    runs-on: ${{ github.repository == 'wiesche89/grin' && github.event_name == 'push' && matrix.arch == 'x86_64' && 'grin-build' || matrix.runner }}
     container:
       image: ${{ matrix.image }}
     strategy:
