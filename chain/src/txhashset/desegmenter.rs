@@ -860,7 +860,7 @@ impl Desegmenter {
 	}
 
 	fn next_required_segment_index(
-		segment_type: &str,
+		segment_type: SegmentType,
 		local_mmr_size: u64,
 		target_mmr_size: u64,
 		segment_height: u8,
@@ -904,7 +904,7 @@ impl Desegmenter {
 		}
 
 		Self::next_required_segment_index(
-			"output",
+			SegmentType::Output,
 			local_output_mmr_size,
 			self.archive_header.output_mmr_size,
 			self.default_output_segment_height,
@@ -986,7 +986,7 @@ impl Desegmenter {
 		}
 
 		Self::next_required_segment_index(
-			"rangeproof",
+			SegmentType::RangeProof,
 			local_rangeproof_mmr_size,
 			self.archive_header.output_mmr_size,
 			self.default_rangeproof_segment_height,
@@ -1074,7 +1074,7 @@ impl Desegmenter {
 		}
 
 		Self::next_required_segment_index(
-			"kernel",
+			SegmentType::Kernel,
 			local_kernel_mmr_size,
 			self.archive_header.kernel_mmr_size,
 			self.default_kernel_segment_height,
@@ -1129,7 +1129,7 @@ mod tests {
 		);
 		assert_eq!(
 			Desegmenter::next_required_segment_index(
-				"test",
+				SegmentType::Output,
 				local_size,
 				target_size,
 				segment_height
@@ -1138,7 +1138,7 @@ mod tests {
 		);
 		assert_eq!(
 			Desegmenter::next_required_segment_index(
-				"test",
+				SegmentType::Output,
 				target_size,
 				target_size,
 				segment_height
@@ -1148,7 +1148,12 @@ mod tests {
 
 		let boundary = SegmentIdentifier::pmmr_size(4, segment_height);
 		assert_eq!(
-			Desegmenter::next_required_segment_index("test", boundary, target_size, segment_height),
+			Desegmenter::next_required_segment_index(
+				SegmentType::Output,
+				boundary,
+				target_size,
+				segment_height
+			),
 			Some(4)
 		);
 	}
@@ -1158,7 +1163,7 @@ mod tests {
 		let target_size = pmmr::insertion_to_pmmr_index(2);
 		assert_eq!(Desegmenter::local_segment_count(1, 11), 0);
 		assert_eq!(
-			Desegmenter::next_required_segment_index("test", 1, target_size, 11),
+			Desegmenter::next_required_segment_index(SegmentType::Output, 1, target_size, 11),
 			Some(0)
 		);
 	}
