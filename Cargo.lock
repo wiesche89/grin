@@ -1139,6 +1139,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
+ "sha2",
  "siphasher 0.3.11",
  "thiserror 1.0.69",
  "zeroize",

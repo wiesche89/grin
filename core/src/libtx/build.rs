@@ -136,7 +136,7 @@ where
 		"Building input (spending multisig output): {}, {}",
 		value, key_id
 	);
-	build_multisig_input(value, OutputFeatures::Multisig, key_id, commit)
+	build_multisig_input(value, OutputFeatures::Plain, key_id, commit)
 }
 
 /// Adds a coinbase input spending a coinbase output.
@@ -218,7 +218,7 @@ where
 			let proof = RangeProof::zero();
 
 			Ok((
-				tx.with_output(Output::new(OutputFeatures::Multisig, commit_sum, proof)),
+				tx.with_output(Output::new(OutputFeatures::Plain, commit_sum, proof)),
 				sum.add_key_id(key_id.to_value_path(value)),
 			))
 		},

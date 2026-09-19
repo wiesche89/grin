@@ -18,8 +18,9 @@ use crate::libtx::error::Error;
 use blake2::blake2b::blake2b;
 use keychain::extkey_bip32::BIP32GrinHasher;
 use keychain::{Identifier, Keychain, SwitchCommitmentType, ViewKey};
+use sha2::{Digest, Sha256};
 use std::convert::TryFrom;
-use util::secp::key::{PublicKey, SecretKey};
+use util::secp::key::{PublicKey, SecretKey, ZERO_KEY};
 use util::secp::pedersen::{Commitment, ProofMessage, RangeProof};
 use util::secp::{self, Secp256k1};
 use zeroize::Zeroize;
@@ -81,22 +82,215 @@ where
 	// it is not supported at the wallet level (yet).
 	let secp = k.secp();
 	let skey = k.derive_key(amount, key_id, switch)?;
-	let private_nonce = b.private_nonce(secp, &commits[0])?;
+	let commit = commits
+		.first()
+		.ok_or_else(|| Error::RangeProof("Missing shared commitment".into()))?;
+	let private_nonce = b.private_nonce(secp, commit)?;
 	let message = b.proof_message(secp, key_id, switch)?;
 
-	Ok(secp.bullet_proof_multisig(
+	create_multisig_with_key(
+		secp,
 		amount,
-		skey,
-		common_nonce.clone(),
-		extra_data,
-		Some(message),
+		&skey,
+		common_nonce,
+		&private_nonce,
+		message,
 		tau_x,
 		tau_one,
 		tau_two,
-		commits.to_vec(),
-		Some(&private_nonce),
+		commits,
 		step,
-	))
+		extra_data,
+	)
+}
+
+/// Build one round of a shared proof using an explicit blinding-key contribution.
+/// The caller coordinates participants, nonce lifetimes and round aggregation.
+/// This primitive does not implement a threshold signing protocol.
+pub fn create_multisig_with_key(
+	secp: &Secp256k1,
+	amount: u64,
+	key: &SecretKey,
+	common_nonce: &SecretKey,
+	private_nonce: &SecretKey,
+	message: ProofMessage,
+	tau_x: Option<&mut SecretKey>,
+	tau_one: Option<&mut PublicKey>,
+	tau_two: Option<&mut PublicKey>,
+	commits: &[Commitment],
+	step: u8,
+	extra_data: Option<Vec<u8>>,
+) -> Result<Option<RangeProof>, Error> {
+	if commits.len() != 1 || step > 2 || (step == 1) != tau_x.is_none() {
+		return Err(Error::RangeProof("Invalid multisig proof round".into()));
+	}
+	let tau_one = tau_one.ok_or_else(|| Error::RangeProof("Missing T1".into()))?;
+	let tau_two = tau_two.ok_or_else(|| Error::RangeProof("Missing T2".into()))?;
+	if step != 1 && (!tau_one.is_valid() || !tau_two.is_valid()) {
+		return Err(Error::RangeProof(
+			"Invalid multisig nonce commitments".into(),
+		));
+	}
+	SecretKey::from_slice(secp, &key.0)?;
+	SecretKey::from_slice(secp, &common_nonce.0)?;
+	SecretKey::from_slice(secp, &private_nonce.0)?;
+	commits[0].to_pubkey(secp)?;
+	// The backend requires a commitment-capable context.
+	secp.commit_value(1)?;
+
+	let mut t1 = if step == 1 {
+		PublicKey::new()
+	} else {
+		*tau_one
+	};
+	let mut t2 = if step == 1 {
+		PublicKey::new()
+	} else {
+		*tau_two
+	};
+	// The legacy backend does not return its status. Use an invalid scalar to
+	// distinguish a missing round-two result from a valid (possibly zero) tau.
+	let mut tau = SecretKey([0xff; 32]);
+	if step == 0 {
+		tau = (**tau_x.as_ref().unwrap()).clone();
+		if tau != ZERO_KEY {
+			SecretKey::from_slice(secp, &tau.0)?;
+		}
+	}
+	let proof = secp.bullet_proof_multisig(
+		amount,
+		key.clone(),
+		common_nonce.clone(),
+		extra_data.clone(),
+		Some(message),
+		if step == 1 { None } else { Some(&mut tau) },
+		Some(&mut t1),
+		Some(&mut t2),
+		commits.to_vec(),
+		Some(private_nonce),
+		step,
+	);
+	match step {
+		1 => {
+			if !t1.is_valid() || !t2.is_valid() {
+				return Err(Error::RangeProof(
+					"Failed to create nonce commitments".into(),
+				));
+			}
+			*tau_one = t1;
+			*tau_two = t2;
+			Ok(None)
+		}
+		2 => {
+			if tau != ZERO_KEY {
+				SecretKey::from_slice(secp, &tau.0)?;
+			}
+			*tau_x.unwrap() = tau;
+			Ok(None)
+		}
+		_ => {
+			let proof = proof.ok_or_else(|| Error::RangeProof("Failed to create proof".into()))?;
+			verify(secp, commits[0], proof, extra_data)?;
+			Ok(Some(proof))
+		}
+	}
+}
+
+/// Verify one participant's tau contribution against the agreed proof transcript.
+/// The public key is the participant's weighted blinding-key contribution; T1
+/// and T2 are its nonce commitments from round one, not their aggregate.
+///
+/// The caller must bind the transcript and participant keys to the session.
+/// This also accepts a candidate proof with an invalid aggregate tau, allowing
+/// individual contributions to be checked before accepting the completed proof.
+/// It does not replace verification of the complete rangeproof.
+pub fn verify_multisig_partial(
+	secp: &Secp256k1,
+	commit: Commitment,
+	proof: &RangeProof,
+	extra_data: Option<&[u8]>,
+	public_key: &PublicKey,
+	tau_one: &PublicKey,
+	tau_two: &PublicKey,
+	tau_x: &SecretKey,
+) -> Result<(), Error> {
+	let (x, z) = multisig_challenges(secp, commit, proof, extra_data)?;
+	let mut x_squared = x.clone();
+	x_squared.mul_assign(secp, &x)?;
+	let mut z_squared = z.clone();
+	z_squared.mul_assign(secp, &z)?;
+	let mut expected = Vec::with_capacity(3);
+	for (point, coefficient) in [(tau_one, x), (tau_two, x_squared), (public_key, z_squared)] {
+		if !point.is_valid() {
+			return Err(Error::RangeProof(
+				"Invalid multisig contribution key".into(),
+			));
+		}
+		let mut point = *point;
+		point.mul_assign(secp, &coefficient)?;
+		expected.push(Commitment::from_pubkey(secp, &point)?);
+	}
+	let actual = if *tau_x == ZERO_KEY {
+		vec![]
+	} else {
+		SecretKey::from_slice(secp, &tau_x.0)?;
+		vec![secp.commit(0, tau_x.clone())?]
+	};
+	if !secp.verify_commit_sum(expected, actual) {
+		return Err(Error::RangeProof(
+			"Invalid multisig proof contribution".into(),
+		));
+	}
+	Ok(())
+}
+
+// Match the single-output transcript in secp256k1-zkp's bulletproof verifier.
+// The first 64 bytes hold scalars; the next 129 encode A, S, T1 and T2 using
+// one quadratic-residue bit per point followed by their x coordinates.
+fn multisig_challenges(
+	secp: &Secp256k1,
+	commit: Commitment,
+	proof: &RangeProof,
+	extra_data: Option<&[u8]>,
+) -> Result<(SecretKey, SecretKey), Error> {
+	if proof.plen < 193 || proof.plen > proof.proof.len() || proof.proof[64] & 0xf0 != 0 {
+		return Err(Error::RangeProof(
+			"Invalid multisig proof transcript".into(),
+		));
+	}
+	commit.to_pubkey(secp)?;
+	let mut points = Vec::with_capacity(4);
+	for i in 0..4 {
+		let mut point = [0; 33];
+		point[0] = 8 | ((proof.proof[64] >> i) & 1);
+		point[1..].copy_from_slice(&proof.proof[65 + i * 32..97 + i * 32]);
+		let point = Commitment(point);
+		point.to_pubkey(secp)?;
+		points.push(point);
+	}
+	let mut transcript = [0; 32];
+	let update = |state: &mut [u8; 32], left: Commitment, right: Commitment| {
+		let mut hash = Sha256::new();
+		hash.update(&*state);
+		hash.update([((left.0[0] & 1) << 1) | (right.0[0] & 1)]);
+		hash.update(&left.0[1..]);
+		hash.update(&right.0[1..]);
+		state.copy_from_slice(&hash.finalize());
+	};
+	update(&mut transcript, commit, secp.commit_value(1)?);
+	if let Some(data) = extra_data {
+		let mut hash = Sha256::new();
+		hash.update(transcript);
+		hash.update(data);
+		transcript.copy_from_slice(&hash.finalize());
+	}
+	update(&mut transcript, points[0], points[1]);
+	SecretKey::from_slice(secp, &transcript)?; // y
+	update(&mut transcript, points[0], points[1]);
+	let z = SecretKey::from_slice(secp, &transcript)?;
+	update(&mut transcript, points[2], points[3]);
+	let x = SecretKey::from_slice(secp, &transcript)?;
+	Ok((x, z))
 }
 
 /// Verify a proof
@@ -656,13 +850,13 @@ mod tests {
 			tau_x_sum.add_assign(secp, &tau_x_b).unwrap();
 
 			// 3rd step, party A finalizes the bulletproof
-			let proof = create_multisig(
-				&a_keychain,
-				&a_builder,
+			let proof = create_multisig_with_key(
+				secp,
 				amount,
-				&id,
-				switch,
+				&a_keychain.derive_key(amount, &id, switch).unwrap(),
 				&common_nonce,
+				&a_builder.private_nonce(secp, &commits[0]).unwrap(),
+				a_builder.proof_message(secp, &id, switch).unwrap(),
 				Some(&mut tau_x_sum),
 				Some(&mut tau_one_sum),
 				Some(&mut tau_two_sum),
@@ -673,7 +867,9 @@ mod tests {
 			.unwrap();
 			assert!(proof.is_some());
 
-			assert!(verify_multisig(secp, commits.clone(), vec![proof.unwrap()], None).is_ok());
+			let proof = proof.unwrap();
+			assert!(verify(secp, commits[0], proof, None).is_ok());
+			assert!(verify_multisig(secp, commits.clone(), vec![proof], None).is_ok());
 			commits
 		};
 		// Without switch commitment
@@ -773,13 +969,13 @@ mod tests {
 			tau_x_sum.add_assign(secp, &tau_x_b).unwrap();
 
 			// 3rd step, party A finalizes the bulletproof
-			let proof = create_multisig(
-				&a_keychain,
-				&a_builder,
+			let proof = create_multisig_with_key(
+				secp,
 				amount,
-				&id,
-				switch,
+				&a_keychain.derive_key(amount, &id, switch).unwrap(),
 				&common_nonce,
+				&a_builder.private_nonce(secp, &commits[0]).unwrap(),
+				a_builder.proof_message(secp, &id, switch).unwrap(),
 				Some(&mut tau_x_sum),
 				Some(&mut tau_one_sum),
 				Some(&mut tau_two_sum),
@@ -790,7 +986,9 @@ mod tests {
 			.unwrap();
 			assert!(proof.is_some());
 
-			assert!(verify_multisig(secp, commits.clone(), vec![proof.unwrap()], None).is_ok());
+			let proof = proof.unwrap();
+			assert!(verify(secp, commits[0], proof, None).is_ok());
+			assert!(verify_multisig(secp, commits.clone(), vec![proof], None).is_ok());
 			commits
 		};
 		// The resulting pedersen commitments should be different

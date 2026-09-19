@@ -24,6 +24,7 @@
 pub mod aggsig;
 pub mod build;
 mod error;
+pub mod multisig;
 pub mod proof;
 pub mod reward;
 pub mod secp_ser;
