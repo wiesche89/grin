@@ -28,12 +28,13 @@ use crate::core::core::{OutputIdentifier, Segment, SegmentIdentifier, TxKernel};
 use crate::core::global;
 use crate::core::pow::Difficulty;
 use crate::handshake::Handshake;
+use crate::msg::PeerAddrs;
 use crate::peer::Peer;
 use crate::peers::Peers;
 use crate::store::PeerStore;
 use crate::types::{
-	Capabilities, ChainAdapter, Error, NetAdapter, P2PConfig, PeerAddr, PeerInfo, ReasonForBan,
-	TxHashSetRead,
+	Capabilities, ChainAdapter, Error, HeaderSegmentAcceptance, NetAdapter, P2PConfig, PeerAddr,
+	PeerInfo, ReasonForBan, TxHashSetRead,
 };
 use crate::util::secp::pedersen::RangeProof;
 use crate::util::StopState;
@@ -119,6 +120,27 @@ impl Server {
 					}
 					match self.handle_new_peer(stream) {
 						Err(Error::ConnectionClose) => debug!("shutting down, ignoring a new peer"),
+						Err(Error::Connection(e)) => {
+							if matches!(
+								e.kind(),
+								io::ErrorKind::UnexpectedEof
+									| io::ErrorKind::ConnectionAborted
+									| io::ErrorKind::ConnectionReset
+									| io::ErrorKind::BrokenPipe | io::ErrorKind::TimedOut
+							) {
+								debug!(
+									"Temporary peer connection error from {}: {:?}",
+									peer_addr, e
+								);
+							} else {
+								debug!("Error accepting peer {}: {:?}", peer_addr.to_string(), e);
+								let _ =
+									self.peers.add_banned(peer_addr, ReasonForBan::BadHandshake);
+							}
+						}
+						Err(Error::PeerWithSelf) | Err(Error::Timeout) | Err(Error::Send(_)) => {
+							debug!("Ignoring peer accept error from {}", peer_addr);
+						}
 						Err(e) => {
 							debug!("Error accepting peer {}: {:?}", peer_addr.to_string(), e);
 							let _ = self.peers.add_banned(peer_addr, ReasonForBan::BadHandshake);
@@ -187,11 +209,20 @@ impl Server {
 					&self.handshake,
 					self.peers.clone(),
 				)?;
-				if self.peers.enough_outbound_peers() {
-					peer.stop();
-				}
 				let peer = Arc::new(peer);
-				self.peers.add_connected(peer.clone())?;
+				if self.peers.enough_outbound_peers()
+					&& !self
+						.config
+						.peers_preferred
+						.as_ref()
+						.unwrap_or(&PeerAddrs::default())
+						.matches_addr(&peer.info.addr)
+				{
+					peer.stop("enough outbound peers");
+					self.peers.record_connected(&peer.info);
+				} else {
+					self.peers.add_connected(peer.clone())?;
+				}
 				Ok(peer)
 			}
 			Err(e) => {
@@ -341,6 +372,13 @@ impl ChainAdapter for DummyAdapter {
 	fn locate_headers(&self, _: &[Hash]) -> Result<Vec<core::BlockHeader>, chain::Error> {
 		Ok(vec![])
 	}
+	fn locate_header_segment(
+		&self,
+		_: SegmentIdentifier,
+		_: &PeerInfo,
+	) -> Result<Option<Vec<core::BlockHeader>>, chain::Error> {
+		Ok(Some(vec![]))
+	}
 	fn get_block(&self, _: Hash, _: &PeerInfo) -> Option<core::Block> {
 		None
 	}
@@ -419,6 +457,7 @@ impl ChainAdapter for DummyAdapter {
 		_block_hash: Hash,
 		_output_root: Hash,
 		_segment: Segment<BitmapChunk>,
+		_peer_info: &PeerInfo,
 	) -> Result<bool, chain::Error> {
 		unimplemented!()
 	}
@@ -428,6 +467,7 @@ impl ChainAdapter for DummyAdapter {
 		_block_hash: Hash,
 		_bitmap_root: Hash,
 		_segment: Segment<OutputIdentifier>,
+		_peer_info: &PeerInfo,
 	) -> Result<bool, chain::Error> {
 		unimplemented!()
 	}
@@ -436,6 +476,7 @@ impl ChainAdapter for DummyAdapter {
 		&self,
 		_block_hash: Hash,
 		_segment: Segment<RangeProof>,
+		_peer_info: &PeerInfo,
 	) -> Result<bool, chain::Error> {
 		unimplemented!()
 	}
@@ -444,8 +485,18 @@ impl ChainAdapter for DummyAdapter {
 		&self,
 		_block_hash: Hash,
 		_segment: Segment<TxKernel>,
+		_peer_info: &PeerInfo,
 	) -> Result<bool, chain::Error> {
 		unimplemented!()
+	}
+
+	fn receive_header_segment(
+		&self,
+		_id: SegmentIdentifier,
+		_headers: &[core::BlockHeader],
+		_peer_info: &PeerInfo,
+	) -> Result<HeaderSegmentAcceptance, chain::Error> {
+		Ok(HeaderSegmentAcceptance::Accepted)
 	}
 }
 

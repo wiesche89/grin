@@ -84,7 +84,7 @@ struct RpcError {
 impl RpcError {
 	pub fn internal_error() -> Self {
 		RpcError {
-			code: 32603,
+			code: -32603,
 			message: "Internal error".to_owned(),
 		}
 	}
@@ -918,6 +918,81 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::chain::types::{HeaderSyncMode, NoopAdapter, SyncStatus};
+	use crate::core::genesis;
+	use crate::core::global::{self, ChainTypes};
+	use crate::core::pow::Difficulty;
+	use std::fs;
+	use std::sync::OnceLock;
+
+	// ----------------------------------------
+	// Helpers
+
+	const TEST_MINIMUM_SHARE_DIFFICULTY: u64 = 1;
+
+	fn dummy_tx() -> Tx {
+		let (tx, _rx) = mpsc::unbounded();
+		tx
+	}
+
+	/// Read-only chain shared by the RPC routing tests below, so the suite
+	/// opens a single LMDB env. Tests that write to the chain need their own.
+	fn shared_test_chain() -> Arc<chain::Chain> {
+		static CHAIN: OnceLock<Arc<chain::Chain>> = OnceLock::new();
+		CHAIN
+			.get_or_init(|| {
+				global::set_local_chain_type(ChainTypes::AutomatedTesting);
+				// Under the crate-local target directory (servers/target/tmp), not
+				// the workspace target/, so interrupted tests do not litter the repo root.
+				let dir = "target/tmp/grin_stratum_test_shared_chain";
+				let _ = fs::remove_dir_all(dir);
+				Arc::new(
+					chain::Chain::init(
+						dir.to_string(),
+						Arc::new(NoopAdapter {}),
+						genesis::genesis_dev(),
+						pow::verify_size,
+						false,
+						None,
+					)
+					.unwrap(),
+				)
+			})
+			.clone()
+	}
+
+	/// Build a Handler backed by the shared test chain for RPC routing tests.
+	fn setup_handler() -> Handler {
+		global::set_local_chain_type(ChainTypes::AutomatedTesting);
+		let chain = shared_test_chain();
+		let stratum_stats = Arc::new(RwLock::new(StratumStats::default()));
+		let sync_state = Arc::new(SyncState::new());
+		// Default SyncState is Initial (syncing); mark as fully synced for most tests.
+		sync_state.update(SyncStatus::NoSync);
+		Handler::new(
+			String::from("test"),
+			stratum_stats,
+			sync_state,
+			TEST_MINIMUM_SHARE_DIFFICULTY,
+			chain,
+		)
+	}
+
+	fn rpc_request(method: &str, params: Option<Value>) -> RpcRequest {
+		RpcRequest {
+			id: JsonId::IntId(1),
+			jsonrpc: String::from("2.0"),
+			method: method.to_string(),
+			params,
+		}
+	}
+
+	fn parse_rpc_response(json: &str) -> RpcResponse {
+		serde_json::from_str(json).unwrap()
+	}
+
+	// ----------------------------------------
+	// RpcRequest / RpcResponse serde
 
 	/// Tests deserializing an `RpcRequest` given a String as the id.
 	#[test]
@@ -1057,5 +1132,411 @@ mod tests {
 		let actual_deserialized: RpcResponse = serde_json::from_str(&json_actual).unwrap();
 
 		assert_eq!(expected_deserialized, actual_deserialized);
+	}
+
+	// ----------------------------------------
+	// RpcError
+
+	#[test]
+	fn test_rpc_error_constructors() {
+		// Regression: internal_error() must serialize with the negative
+		// JSON-RPC 2.0 code, matching api/src/json_rpc.rs.
+		let value: Value = RpcError::internal_error().into();
+		assert_eq!(value["code"], -32603);
+	}
+
+	// ----------------------------------------
+	// parse_params
+
+	#[test]
+	fn test_parse_params_ok() {
+		let login: LoginParams = parse_params(Some(serde_json::json!({
+			"login": "miner1",
+			"pass": "x",
+			"agent": "grin-miner"
+		})))
+		.unwrap();
+		assert_eq!(login.login, "miner1");
+
+		let submit: SubmitParams = parse_params(Some(serde_json::json!({
+			"height": 42,
+			"job_id": 0,
+			"nonce": 12345,
+			"edge_bits": 29,
+			"pow": [1, 2, 3, 4]
+		})))
+		.unwrap();
+		assert_eq!(submit.height, 42);
+		assert_eq!(submit.pow, vec![1, 2, 3, 4]);
+	}
+
+	#[test]
+	fn test_parse_params_none() {
+		let res: Result<LoginParams, _> = parse_params(None);
+		let err = res.unwrap_err();
+		assert_eq!(err.code, RpcError::invalid_request().code);
+	}
+
+	#[test]
+	fn test_parse_params_wrong_shape() {
+		let params = serde_json::json!({"foo": "bar"});
+		let res: Result<LoginParams, _> = parse_params(Some(params));
+		let err = res.unwrap_err();
+		assert_eq!(err.code, RpcError::invalid_request().code);
+	}
+
+	// ----------------------------------------
+	// WorkersList
+
+	#[test]
+	fn test_workers_list_add_login_remove() {
+		let stats = Arc::new(RwLock::new(StratumStats::default()));
+		let workers = WorkersList::new(stats.clone());
+
+		assert_eq!(workers.count(), 0);
+
+		let id0 = workers.add_worker(dummy_tx());
+		let id1 = workers.add_worker(dummy_tx());
+		assert_eq!(id0, 0);
+		assert_eq!(id1, 1);
+		assert_eq!(workers.count(), 2);
+		assert_eq!(stats.read().num_workers, 2);
+
+		workers
+			.login(id0, "alice".to_string(), "agent-a".to_string())
+			.unwrap();
+		let w = workers.get_worker(id0).unwrap();
+		assert_eq!(w.login.as_deref(), Some("alice"));
+		assert_eq!(w.agent, "agent-a");
+		assert!(w.authenticated);
+
+		let ws = workers.get_stats(id0).unwrap();
+		assert_eq!(ws.id, "0");
+		assert!(ws.is_connected);
+
+		workers.remove_worker(id0);
+		assert_eq!(workers.count(), 1);
+		assert_eq!(stats.read().num_workers, 1);
+		assert!(!workers.get_stats(id0).unwrap().is_connected);
+		assert!(workers.get_worker(id0).is_err());
+	}
+
+	#[test]
+	fn test_workers_list_relogin_replaces_login_and_agent() {
+		let stats = Arc::new(RwLock::new(StratumStats::default()));
+		let workers = WorkersList::new(stats);
+		let id0 = workers.add_worker(dummy_tx());
+
+		workers
+			.login(id0, "alice".to_string(), "agent-a".to_string())
+			.unwrap();
+		// A second login for the same worker replaces the previous
+		// login and agent rather than being rejected.
+		workers
+			.login(id0, "bob".to_string(), "agent-b".to_string())
+			.unwrap();
+
+		let w = workers.get_worker(id0).unwrap();
+		assert_eq!(w.login.as_deref(), Some("bob"));
+		assert_eq!(w.agent, "agent-b");
+		assert!(w.authenticated);
+	}
+
+	#[test]
+	fn test_workers_list_login_missing_worker() {
+		let stats = Arc::new(RwLock::new(StratumStats::default()));
+		let workers = WorkersList::new(stats);
+		let err = workers
+			.login(99, "x".to_string(), "y".to_string())
+			.unwrap_err();
+		assert_eq!(err.code, RpcError::internal_error().code);
+	}
+
+	#[test]
+	fn test_workers_list_get_stats_missing_worker() {
+		let stats = Arc::new(RwLock::new(StratumStats::default()));
+		let workers = WorkersList::new(stats);
+		let _ = workers.add_worker(dummy_tx());
+
+		// Index past the end of the stats vec: `get_stats` reports it as a
+		// clean RpcError rather than panicking.
+		let err = workers.get_stats(99).unwrap_err();
+		assert_eq!(err.code, RpcError::internal_error().code);
+	}
+
+	#[test]
+	fn test_workers_list_broadcast_and_send_to() {
+		let stats = Arc::new(RwLock::new(StratumStats::default()));
+		let workers = WorkersList::new(stats);
+
+		let (tx0, mut rx0) = mpsc::unbounded();
+		let (tx1, mut rx1) = mpsc::unbounded();
+		let id0 = workers.add_worker(tx0);
+		let _id1 = workers.add_worker(tx1);
+
+		workers.broadcast("hello-all".to_string());
+		assert_eq!(
+			futures::executor::block_on(rx0.next()).unwrap(),
+			"hello-all"
+		);
+		assert_eq!(
+			futures::executor::block_on(rx1.next()).unwrap(),
+			"hello-all"
+		);
+
+		workers.send_to(id0, "hello-one".to_string());
+		assert_eq!(
+			futures::executor::block_on(rx0.next()).unwrap(),
+			"hello-one"
+		);
+		// Unicast must not deliver to the other worker (channel open but empty).
+		assert!(rx1.try_recv().is_err());
+	}
+
+	#[test]
+	fn test_workers_list_network_stats() {
+		global::set_local_chain_type(ChainTypes::AutomatedTesting);
+		let stats = Arc::new(RwLock::new(StratumStats::default()));
+		let workers = WorkersList::new(stats.clone());
+
+		workers.update_block_height(100);
+		workers.update_network_difficulty(1000);
+		workers.update_edge_bits(29);
+
+		let s = stats.read();
+		assert_eq!(s.block_height, 100);
+		assert_eq!(s.network_difficulty, 1000);
+		assert_eq!(s.edge_bits, 29);
+		// hashrate is recomputed from difficulty / graph_weight
+		assert!(s.network_hashrate > 0.0);
+	}
+
+	// ----------------------------------------
+	// Handler RPC routing
+
+	#[test]
+	fn test_handle_keepalive() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("keepalive", None), worker_id),
+		);
+		assert!(resp.error.is_none());
+		assert_eq!(resp.result, Some(Value::String("ok".to_string())));
+		assert_eq!(resp.method, "keepalive");
+	}
+
+	#[test]
+	fn test_handle_method_not_found() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("does_not_exist", None), worker_id),
+		);
+		assert!(resp.result.is_none());
+		let err = resp.error.unwrap();
+		assert_eq!(err["code"], -32601);
+		assert_eq!(err["message"], "Method not found");
+	}
+
+	#[test]
+	fn test_handle_login_ok() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		let params = serde_json::json!({
+			"login": "bob",
+			"pass": "secret",
+			"agent": "test-agent"
+		});
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("login", Some(params)), worker_id),
+		);
+		assert!(resp.error.is_none());
+		assert_eq!(resp.result, Some(Value::String("ok".to_string())));
+
+		let worker = handler.workers.get_worker(worker_id).unwrap();
+		assert_eq!(worker.login.as_deref(), Some("bob"));
+		assert_eq!(worker.agent, "test-agent");
+		assert!(worker.authenticated);
+	}
+
+	#[test]
+	fn test_handle_login_invalid_params() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		let resp =
+			parse_rpc_response(&handler.handle_rpc_requests(rpc_request("login", None), worker_id));
+		assert!(resp.result.is_none());
+		let err = resp.error.unwrap();
+		assert_eq!(err["code"], -32600);
+	}
+
+	#[test]
+	fn test_handle_getjobtemplate_while_syncing() {
+		let handler = setup_handler();
+		// Force syncing state
+		handler.sync_state.update(SyncStatus::HeaderSync {
+			sync_head: handler.chain.head().unwrap(),
+			sync_mode: HeaderSyncMode::Legacy,
+			highest_height: 100,
+			highest_diff: Difficulty::from_num(1000),
+		});
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("getjobtemplate", None), worker_id),
+		);
+		assert!(resp.result.is_none());
+		let err = resp.error.unwrap();
+		assert_eq!(err["code"], -32000);
+		assert_eq!(err["message"], "Node is syncing - Please wait");
+	}
+
+	#[test]
+	fn test_handle_getjobtemplate_ok() {
+		let handler = setup_handler();
+		// Non-default difficulty so the template path is not only asserting the const.
+		let job_difficulty = 7;
+		handler.current_state.write().minimum_share_difficulty = job_difficulty;
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("getjobtemplate", None), worker_id),
+		);
+		assert!(resp.error.is_none());
+		let result = resp.result.unwrap();
+		assert_eq!(result["height"], 0);
+		assert_eq!(result["job_id"], 0);
+		assert_eq!(result["difficulty"], job_difficulty);
+		// pre_pow is hex-encoded header bytes.
+		let pre_pow = result["pre_pow"].as_str().unwrap();
+		assert!(!pre_pow.is_empty());
+		assert!(pre_pow.chars().all(|c| c.is_ascii_hexdigit()));
+	}
+
+	#[test]
+	fn test_handle_status() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+		handler.workers.update_stats(worker_id, |ws| {
+			ws.num_accepted = 10;
+			ws.num_rejected = 2;
+			ws.num_stale = 1;
+			ws.pow_difficulty = 5;
+		});
+
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("status", None), worker_id),
+		);
+		assert!(resp.error.is_none());
+		let result = resp.result.unwrap();
+		assert_eq!(result["id"], "0");
+		assert_eq!(result["height"], 0);
+		assert_eq!(result["difficulty"], 5);
+		assert_eq!(result["accepted"], 10);
+		assert_eq!(result["rejected"], 2);
+		assert_eq!(result["stale"], 1);
+	}
+
+	#[test]
+	fn test_handle_submit_too_late() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		// Wrong height vs current block version (height 0) => stale share
+		let params = serde_json::json!({
+			"height": 99,
+			"job_id": 0,
+			"nonce": 1,
+			"edge_bits": 29,
+			"pow": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
+		});
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("submit", Some(params)), worker_id),
+		);
+		assert!(resp.result.is_none());
+		let err = resp.error.unwrap();
+		assert_eq!(err["code"], -32503);
+
+		let ws = handler.workers.get_stats(worker_id).unwrap();
+		assert_eq!(ws.num_stale, 1);
+	}
+
+	#[test]
+	fn test_handle_submit_invalid_job_id() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		// job_id out of range of current_block_versions
+		let params = serde_json::json!({
+			"height": 0,
+			"job_id": 99,
+			"nonce": 1,
+			"edge_bits": 29,
+			"pow": [0, 1, 2, 3]
+		});
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("submit", Some(params)), worker_id),
+		);
+		assert!(resp.result.is_none());
+		assert_eq!(resp.error.unwrap()["code"], -32503);
+		assert_eq!(handler.workers.get_stats(worker_id).unwrap().num_stale, 1);
+	}
+
+	#[test]
+	fn test_handle_submit_missing_params() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("submit", None), worker_id),
+		);
+		assert!(resp.result.is_none());
+		assert_eq!(resp.error.unwrap()["code"], -32600);
+	}
+
+	#[test]
+	fn test_handle_submit_invalid_edge_bits() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+
+		// edge_bits below the AutomatedTesting minimum (10) and not the
+		// secondary size (29): the proof is neither primary nor secondary, so
+		// it is rejected before any cuckoo verification is attempted.
+		let params = serde_json::json!({
+			"height": 0,
+			"job_id": 0,
+			"nonce": 1,
+			"edge_bits": 5,
+			"pow": [0, 1, 2, 3]
+		});
+		let resp = parse_rpc_response(
+			&handler.handle_rpc_requests(rpc_request("submit", Some(params)), worker_id),
+		);
+		assert!(resp.result.is_none());
+		assert_eq!(resp.error.unwrap()["code"], -32502);
+		assert_eq!(
+			handler.workers.get_stats(worker_id).unwrap().num_rejected,
+			1
+		);
+	}
+
+	#[test]
+	fn test_last_seen_updates() {
+		let handler = setup_handler();
+		let worker_id = handler.workers.add_worker(dummy_tx());
+		// Force a known baseline instead of racing a real clock read against
+		// the update below.
+		handler
+			.workers
+			.update_stats(worker_id, |ws| ws.last_seen = SystemTime::UNIX_EPOCH);
+
+		let _ = handler.handle_rpc_requests(rpc_request("keepalive", None), worker_id);
+		let after = handler.workers.get_stats(worker_id).unwrap().last_seen;
+		assert!(after > SystemTime::UNIX_EPOCH);
 	}
 }
