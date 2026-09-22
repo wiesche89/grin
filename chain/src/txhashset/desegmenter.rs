@@ -73,6 +73,38 @@ pub struct Desegmenter {
 	latest_block_height: u64,
 }
 
+/// Return the next required segment for a PMMR.
+/// A size of 1 is the genesis-only state; segment 0 is requested and genesis
+/// is skipped when applying it.
+fn next_required_segment_index(
+	local_mmr_size: u64,
+	target_mmr_size: u64,
+	segment_height: u8,
+) -> Option<u64> {
+	let mut current = if local_mmr_size == 1 {
+		0
+	} else {
+		SegmentIdentifier::count_segments_required(local_mmr_size, segment_height)
+	};
+	let total = SegmentIdentifier::count_segments_required(target_mmr_size, segment_height);
+
+	// When resuming, request the previous segment if the local copy is partial.
+	// Do not repeat a final partial segment once the target size is reached.
+	if local_mmr_size < target_mmr_size {
+		let segment_end = SegmentIdentifier::pmmr_size(current, segment_height);
+		if local_mmr_size < segment_end {
+			trace!(
+				"segment end {} is bigger than the current MMR size {}",
+				segment_end,
+				local_mmr_size
+			);
+			current -= 1;
+		}
+	}
+
+	(current != total).then_some(current as u64)
+}
+
 impl Desegmenter {
 	/// Create a new segmenter based on the provided txhashset and the specified block header
 	pub fn new(
@@ -854,45 +886,21 @@ impl Desegmenter {
 			local_output_mmr_size = txhashset.output_mmr_size();
 		}
 
-		// Special case here. If the mmr size is 1, this is a fresh chain
-		// with naught but a humble genesis block. We need segment 0, (and
-		// also need to skip the genesis block when applying the segment)
-		// note this is implementation-specific, the code for creating
-		// a new chain creates the genesis block pmmr entries by default
-
-		let mut cur_segment_count = if local_output_mmr_size == 1 {
-			0
-		} else {
-			SegmentIdentifier::count_segments_required(
-				local_output_mmr_size,
-				self.default_output_segment_height,
-			)
-		};
-
 		let total_segment_count = SegmentIdentifier::count_segments_required(
 			self.archive_header.output_mmr_size,
 			self.default_output_segment_height,
 		);
-
-		// When resuming, we need to ensure we're getting the previous segment if needed.
-		// Do not apply this to the final partial segment once the target size is reached.
-		if total_segment_count != cur_segment_count {
-			let theoretical_pmmr_size =
-				SegmentIdentifier::pmmr_size(cur_segment_count, self.default_output_segment_height);
-			if local_output_mmr_size < theoretical_pmmr_size {
-				cur_segment_count -= 1;
-			}
-		}
+		let next = next_required_segment_index(
+			local_output_mmr_size,
+			self.archive_header.output_mmr_size,
+			self.default_output_segment_height,
+		);
 		trace!(
 			"Next required output segment is {} of {}",
-			cur_segment_count,
+			next.unwrap_or(total_segment_count as u64),
 			total_segment_count
 		);
-		if cur_segment_count == total_segment_count {
-			None
-		} else {
-			Some(cur_segment_count as u64)
-		}
+		next
 	}
 
 	/// Add an output segment.
@@ -969,45 +977,21 @@ impl Desegmenter {
 			local_rangeproof_mmr_size = txhashset.rangeproof_mmr_size();
 		}
 
-		// Special case here. If the mmr size is 1, this is a fresh chain
-		// with naught but a humble genesis block. We need segment 0, (and
-		// also need to skip the genesis block when applying the segment)
-
-		let mut cur_segment_count = if local_rangeproof_mmr_size == 1 {
-			0
-		} else {
-			SegmentIdentifier::count_segments_required(
-				local_rangeproof_mmr_size,
-				self.default_rangeproof_segment_height,
-			)
-		};
-
 		let total_segment_count = SegmentIdentifier::count_segments_required(
 			self.archive_header.output_mmr_size,
 			self.default_rangeproof_segment_height,
 		);
-
-		// When resuming, we need to ensure we're getting the previous segment if needed.
-		// Do not apply this to the final partial segment once the target size is reached.
-		if total_segment_count != cur_segment_count {
-			let theoretical_pmmr_size = SegmentIdentifier::pmmr_size(
-				cur_segment_count,
-				self.default_rangeproof_segment_height,
-			);
-			if local_rangeproof_mmr_size < theoretical_pmmr_size {
-				cur_segment_count -= 1;
-			}
-		}
+		let next = next_required_segment_index(
+			local_rangeproof_mmr_size,
+			self.archive_header.output_mmr_size,
+			self.default_rangeproof_segment_height,
+		);
 		trace!(
 			"Next required rangeproof segment is {} of {}",
-			cur_segment_count,
+			next.unwrap_or(total_segment_count as u64),
 			total_segment_count
 		);
-		if cur_segment_count == total_segment_count {
-			None
-		} else {
-			Some(cur_segment_count as u64)
-		}
+		next
 	}
 
 	/// Adds a Rangeproof segment
@@ -1090,44 +1074,21 @@ impl Desegmenter {
 			local_kernel_mmr_size = txhashset.kernel_mmr_size();
 		}
 
-		let mut cur_segment_count = if local_kernel_mmr_size == 1 {
-			0
-		} else {
-			SegmentIdentifier::count_segments_required(
-				local_kernel_mmr_size,
-				self.default_kernel_segment_height,
-			)
-		};
-
 		let total_segment_count = SegmentIdentifier::count_segments_required(
 			self.archive_header.kernel_mmr_size,
 			self.default_kernel_segment_height,
 		);
-
-		// When resuming, we need to ensure we're getting the previous segment if needed
-		if total_segment_count != cur_segment_count {
-			let theoretical_pmmr_size =
-				SegmentIdentifier::pmmr_size(cur_segment_count, self.default_kernel_segment_height);
-			if local_kernel_mmr_size < theoretical_pmmr_size {
-				trace!(
-					"theoretical_pmmr_size {} is bigger than the current mmr size {}",
-					theoretical_pmmr_size,
-					local_kernel_mmr_size
-				);
-				cur_segment_count -= 1;
-			}
-		}
-
+		let next = next_required_segment_index(
+			local_kernel_mmr_size,
+			self.archive_header.kernel_mmr_size,
+			self.default_kernel_segment_height,
+		);
 		trace!(
 			"Next required kernel segment is {} of {}",
-			cur_segment_count,
+			next.unwrap_or(total_segment_count as u64),
 			total_segment_count
 		);
-		if cur_segment_count == total_segment_count {
-			None
-		} else {
-			Some(cur_segment_count as u64)
-		}
+		next
 	}
 
 	/// Adds a Kernel segment
@@ -1158,5 +1119,30 @@ impl Desegmenter {
 			self.kernel_segment_cache.len()
 		);
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_pibd_resume_segment() {
+		let segment_height = 11;
+		let local_size = pmmr::insertion_to_pmmr_index(9_000);
+		let target_size = pmmr::insertion_to_pmmr_index(9_720);
+
+		assert_eq!(
+			SegmentIdentifier::count_segments_required(local_size, segment_height),
+			SegmentIdentifier::count_segments_required(target_size, segment_height)
+		);
+		assert_eq!(
+			next_required_segment_index(local_size, target_size, segment_height),
+			Some(4)
+		);
+		assert_eq!(
+			next_required_segment_index(target_size, target_size, segment_height),
+			None
+		);
 	}
 }
