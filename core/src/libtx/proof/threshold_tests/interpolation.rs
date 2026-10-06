@@ -18,20 +18,9 @@ use crate::libtx::Error;
 use util::secp::key::{SecretKey, ONE_KEY};
 use util::secp::Secp256k1;
 
-/// Return a participant's Lagrange coefficient for the selected signing set.
-/// `None` evaluates at zero; `Some(at)` evaluates at a public coin coordinate.
-/// Coordinates are public, nonzero scalars represented by `SecretKey`.
-/// Empty sets, duplicate/invalid coordinates, missing participants and evaluation
-/// at a participant's coordinate are rejected. The latter would expose that
-/// participant's share as the coin key rather than require a quorum.
-///
-/// Multiply the secret share and its verification key by this coefficient before
-/// using the existing aggsig or shared-proof functions. Do not weight nonces.
-/// The caller must authenticate shares and the signing set, check the threshold
-/// against the established key, and manage fresh, single-use signing nonces.
-/// Coin coordinates must also differ from non-signing participants' coordinates.
-/// This is interpolation arithmetic, not a DKG or a threshold signing protocol.
-pub fn lagrange_coefficient(
+/// Lagrange coefficient for a test share. `None` evaluates at zero.
+/// Reject invalid, duplicate or overlapping coordinates before interpolation.
+pub(super) fn lagrange_coefficient(
 	secp: &Secp256k1,
 	participant: &SecretKey,
 	participants: &[SecretKey],

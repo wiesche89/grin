@@ -15,8 +15,12 @@
 //! Exercise threshold key contributions through the ordinary kernel and output verifiers.
 //! Dealer-generated polynomials are test fixtures, not a wallet initialization protocol.
 
-use grin_core::core::{KernelFeatures, Output, OutputFeatures, TxKernel};
-use grin_core::libtx::{aggsig, multisig::lagrange_coefficient, proof};
+use crate::core::{KernelFeatures, Output, OutputFeatures, TxKernel};
+use crate::libtx::Error;
+use crate::libtx::{aggsig, proof};
+use sha2::{Digest, Sha256};
+mod interpolation;
+use interpolation::lagrange_coefficient;
 use rand::thread_rng;
 use util::secp::key::{PublicKey, SecretKey, ZERO_KEY};
 use util::secp::pedersen::{Commitment, ProofMessage, RangeProof};
@@ -146,7 +150,7 @@ fn rangeproof(
 	shares: &[SecretKey],
 	commit: Commitment,
 	extra_data: Option<Vec<u8>>,
-) -> Result<RangeProof, grin_core::libtx::Error> {
+) -> Result<RangeProof, crate::libtx::Error> {
 	let nonce = SecretKey::new(secp, &mut thread_rng());
 	let private: Vec<_> = shares
 		.iter()
@@ -219,7 +223,7 @@ fn rangeproof(
 		             t1: &PublicKey,
 		             t2: &PublicKey,
 		             extra: Option<&[u8]>| {
-			proof::verify_multisig_partial(secp, commit, candidate, extra, key, t1, t2, tau)
+			verify_multisig_partial(secp, commit, candidate, extra, key, t1, t2, tau)
 		};
 		assert!(check(
 			&proof,
@@ -231,7 +235,7 @@ fn rangeproof(
 		)
 		.is_ok());
 		let wrong_commit = secp.commit(43, shares[i].clone()).unwrap();
-		assert!(proof::verify_multisig_partial(
+		assert!(verify_multisig_partial(
 			secp,
 			wrong_commit,
 			&proof,
@@ -444,7 +448,7 @@ fn invalid_proof_rounds() {
 	for length in [0, 192, usize::MAX] {
 		let mut proof = RangeProof::zero();
 		proof.plen = length;
-		assert!(proof::verify_multisig_partial(
+		assert!(verify_multisig_partial(
 			&secp, commit, &proof, None, &public, &public, &public, &key
 		)
 		.is_err());
@@ -510,4 +514,101 @@ fn invalid_proof_inputs_leave_outputs_unchanged() {
 	.is_err());
 	assert_eq!(t1, public);
 	assert_eq!(t2, public);
+}
+
+/// Verify one participant's tau contribution against the agreed proof transcript.
+/// The public key is the participant's weighted blinding-key contribution; T1
+/// and T2 are its nonce commitments from round one, not their aggregate.
+///
+/// The caller must bind the transcript and participant keys to the session.
+/// This also accepts a candidate proof with an invalid aggregate tau, allowing
+/// individual contributions to be checked before accepting the completed proof.
+/// It does not replace verification of the complete rangeproof.
+fn verify_multisig_partial(
+	secp: &Secp256k1,
+	commit: Commitment,
+	proof: &RangeProof,
+	extra_data: Option<&[u8]>,
+	public_key: &PublicKey,
+	tau_one: &PublicKey,
+	tau_two: &PublicKey,
+	tau_x: &SecretKey,
+) -> Result<(), Error> {
+	let (x, z) = multisig_challenges(secp, commit, proof, extra_data)?;
+	let mut x_squared = x.clone();
+	x_squared.mul_assign(secp, &x)?;
+	let mut z_squared = z.clone();
+	z_squared.mul_assign(secp, &z)?;
+	let mut expected = Vec::with_capacity(3);
+	for (point, coefficient) in [(tau_one, x), (tau_two, x_squared), (public_key, z_squared)] {
+		if !point.is_valid() {
+			return Err(Error::RangeProof(
+				"Invalid multisig contribution key".into(),
+			));
+		}
+		let mut point = *point;
+		point.mul_assign(secp, &coefficient)?;
+		expected.push(Commitment::from_pubkey(secp, &point)?);
+	}
+	let actual = if *tau_x == ZERO_KEY {
+		vec![]
+	} else {
+		SecretKey::from_slice(secp, &tau_x.0)?;
+		vec![secp.commit(0, tau_x.clone())?]
+	};
+	if !secp.verify_commit_sum(expected, actual) {
+		return Err(Error::RangeProof(
+			"Invalid multisig proof contribution".into(),
+		));
+	}
+	Ok(())
+}
+
+// Match the single-output transcript in secp256k1-zkp's bulletproof verifier.
+// The first 64 bytes hold scalars; the next 129 encode A, S, T1 and T2 using
+// one quadratic-residue bit per point followed by their x coordinates.
+fn multisig_challenges(
+	secp: &Secp256k1,
+	commit: Commitment,
+	proof: &RangeProof,
+	extra_data: Option<&[u8]>,
+) -> Result<(SecretKey, SecretKey), Error> {
+	if proof.plen < 193 || proof.plen > proof.proof.len() || proof.proof[64] & 0xf0 != 0 {
+		return Err(Error::RangeProof(
+			"Invalid multisig proof transcript".into(),
+		));
+	}
+	commit.to_pubkey(secp)?;
+	let mut points = Vec::with_capacity(4);
+	for i in 0..4 {
+		let mut point = [0; 33];
+		point[0] = 8 | ((proof.proof[64] >> i) & 1);
+		point[1..].copy_from_slice(&proof.proof[65 + i * 32..97 + i * 32]);
+		let point = Commitment(point);
+		point.to_pubkey(secp)?;
+		points.push(point);
+	}
+	let mut transcript = [0; 32];
+	let update = |state: &mut [u8; 32], left: Commitment, right: Commitment| {
+		let mut hash = Sha256::new();
+		hash.update(&*state);
+		hash.update([((left.0[0] & 1) << 1) | (right.0[0] & 1)]);
+		hash.update(&left.0[1..]);
+		hash.update(&right.0[1..]);
+		state.copy_from_slice(&hash.finalize());
+	};
+	update(&mut transcript, commit, secp.commit_value(1)?);
+	if let Some(data) = extra_data {
+		let mut hash = Sha256::new();
+		hash.update(transcript);
+		hash.update(data);
+		transcript.copy_from_slice(&hash.finalize());
+	}
+	update(&mut transcript, points[0], points[1]);
+	SecretKey::from_slice(secp, &transcript)?; // y
+	update(&mut transcript, points[0], points[1]);
+	let z = SecretKey::from_slice(secp, &transcript)?;
+	update(&mut transcript, points[2], points[3]);
+	let x = SecretKey::from_slice(secp, &transcript)?;
+	Ok((x, z))
 }

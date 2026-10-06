@@ -317,6 +317,7 @@ impl Chain {
 	pub fn reset_pibd_head(&self) -> Result<(), Error> {
 		let mut batch = self.store.batch()?;
 		batch.save_pibd_head(&self.genesis().into())?;
+		batch.commit()?;
 		Ok(())
 	}
 
@@ -1737,8 +1738,12 @@ fn setup_head(
 				let mut pibd_in_progress = false;
 				let header = {
 					let head = batch.get_block_header(&head.last_block_h)?;
-					let pibd_tip = store.pibd_head()?;
-					let pibd_head = batch.get_block_header(&pibd_tip.last_block_h)?;
+					let pibd_head = match store.pibd_head() {
+						Ok(tip) => batch.get_block_header(&tip.last_block_h)?,
+						// Test chains use a mined genesis supplied by the caller.
+						Err(NotFoundErr(_)) => genesis.header.clone(),
+						Err(err) => return Err(err.into()),
+					};
 					let pibd_mmr_in_progress = !resetting_pibd
 						&& pibd_head.height >= head.height
 						&& (txhashset.output_mmr_size() > head.output_mmr_size

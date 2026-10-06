@@ -9,6 +9,10 @@ keywords = [ "crypto", "grin", "mimblewimble" ]
 edition = "2021"
 build = "src/build/build.rs"
 
+[features]
+# Identify the node embedded in GRIM without changing standalone Grin nodes.
+grim = []
+
 [dependencies]
 bitflags = "1"
 enum_primitive = "0.1"

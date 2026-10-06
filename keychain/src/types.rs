@@ -111,8 +111,7 @@ impl<'de> de::Visitor<'de> for IdentifierVisitor {
 	where
 		E: de::Error,
 	{
-		let identifier = Identifier::from_hex(s).unwrap();
-		Ok(identifier)
+		Identifier::from_hex(s).map_err(E::custom)
 	}
 }
 
@@ -191,7 +190,8 @@ impl Identifier {
 	}
 
 	pub fn from_hex(hex: &str) -> Result<Identifier, Error> {
-		let bytes = util::from_hex(hex).unwrap();
+		let bytes =
+			util::from_hex(hex).map_err(|_| Error::Path("invalid identifier encoding".into()))?;
 		Ok(Identifier::from_bytes(&bytes))
 	}
 
@@ -200,7 +200,7 @@ impl Identifier {
 	/// FIXME: only supports unhardened paths, modify to support hardened
 	/// paths when they are implemented in `ExtKeychainPath`
 	pub fn from_bip_32_string(b32: &str) -> Result<Identifier, Error> {
-		if b32.len() < 3 || &b32[..2] != "m/" {
+		if b32.len() < 3 || !b32.starts_with("m/") {
 			return Err(Error::Path(format!(
 				"path is too short, or has invalid start: {}",
 				b32.to_string()
@@ -553,6 +553,19 @@ mod test {
 	use crate::util::secp::Secp256k1;
 	use std::slice::from_raw_parts;
 
+	#[test]
+	fn identifier_encoding() {
+		use crate::util::ToHex;
+		let id = Identifier::from_path(&ExtKeychainPath::new(2, 1, 2, 0, 0));
+		assert_eq!(Identifier::from_hex(&id.to_hex()).unwrap(), id);
+		assert_eq!(
+			serde_json::from_str::<Identifier>(&serde_json::to_string(&id).unwrap()).unwrap(),
+			id
+		);
+		assert!(Identifier::from_hex("not hex").is_err());
+		assert!(serde_json::from_str::<Identifier>("\"not hex\"").is_err());
+	}
+
 	// This tests cleaning of BlindingFactor (e.g. secret key) on Drop.
 	// To make this test fail, just remove `Zeroize` derive from `BlindingFactor` definition.
 	#[test]
@@ -678,5 +691,8 @@ mod test {
 		assert!(Identifier::from_bip_32_string(inv_path_5).is_err());
 		assert!(Identifier::from_bip_32_string(inv_non_m).is_err());
 		assert!(Identifier::from_bip_32_string(inv_non_num).is_err());
+		for invalid in ["€", "💥", "m/€", "m/💥", "m/1/💥"] {
+			assert!(Identifier::from_bip_32_string(invalid).is_err());
+		}
 	}
 }

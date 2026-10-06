@@ -92,6 +92,50 @@ fn mine_short_chain() {
 	clean_output_dir(chain_dir);
 }
 
+#[test]
+fn restart_user_testing_chain() {
+	global::set_local_chain_type(ChainTypes::UserTesting);
+	let chain_dir = ".grin.restart_user_testing";
+	let genesis = pow::mine_genesis_block().unwrap();
+	let keychain = ExtKeychain::from_random_seed(false).unwrap();
+	let open = || {
+		Chain::init(
+			chain_dir.to_string(),
+			Arc::new(NoopAdapter {}),
+			genesis.clone(),
+			pow::verify_size,
+			false,
+			None,
+		)
+		.unwrap()
+	};
+	for height in [0, 3] {
+		clean_output_dir(chain_dir);
+		let chain = open();
+		for index in 1..=height {
+			let block = prepare_block(&keychain, &chain.head_header().unwrap(), &chain, index);
+			process_block(&chain, &block);
+		}
+		let expected = chain.head().unwrap();
+		drop(chain);
+
+		let chain = open();
+		assert_eq!(chain.head().unwrap(), expected);
+		chain.validate(false).unwrap();
+		chain.reset_pibd_head().unwrap();
+		drop(chain);
+
+		let chain = open();
+		assert_eq!(chain.head().unwrap(), expected);
+		assert_eq!(
+			chain.store().pibd_head().unwrap(),
+			Tip::from_header(&genesis.header)
+		);
+		drop(chain);
+		clean_output_dir(chain_dir);
+	}
+}
+
 // Convenience wrapper for processing a full block on the test chain.
 fn process_header(chain: &Chain, header: &BlockHeader) {
 	chain

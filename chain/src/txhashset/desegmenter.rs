@@ -73,38 +73,6 @@ pub struct Desegmenter {
 	latest_block_height: u64,
 }
 
-/// Return the next required segment for a PMMR.
-/// A size of 1 is the genesis-only state; segment 0 is requested and genesis
-/// is skipped when applying it.
-fn next_required_segment_index(
-	local_mmr_size: u64,
-	target_mmr_size: u64,
-	segment_height: u8,
-) -> Option<u64> {
-	let mut current = if local_mmr_size == 1 {
-		0
-	} else {
-		SegmentIdentifier::count_segments_required(local_mmr_size, segment_height)
-	};
-	let total = SegmentIdentifier::count_segments_required(target_mmr_size, segment_height);
-
-	// When resuming, request the previous segment if the local copy is partial.
-	// Do not repeat a final partial segment once the target size is reached.
-	if local_mmr_size < target_mmr_size {
-		let segment_end = SegmentIdentifier::pmmr_size(current, segment_height);
-		if local_mmr_size < segment_end {
-			trace!(
-				"segment end {} is bigger than the current MMR size {}",
-				segment_end,
-				local_mmr_size
-			);
-			current -= 1;
-		}
-	}
-
-	(current != total).then_some(current as u64)
-}
-
 impl Desegmenter {
 	/// Create a new segmenter based on the provided txhashset and the specified block header
 	pub fn new(
@@ -878,6 +846,52 @@ impl Desegmenter {
 		Ok(())
 	}
 
+	// A fresh chain contains genesis only. Request segment 0 and skip genesis
+	// when applying it.
+	fn local_segment_count(local_mmr_size: u64, segment_height: u8) -> usize {
+		if local_mmr_size == 1 {
+			0
+		} else {
+			SegmentIdentifier::count_segments_required(local_mmr_size, segment_height)
+		}
+	}
+
+	fn next_required_segment_index(
+		segment_type: SegmentType,
+		local_mmr_size: u64,
+		target_mmr_size: u64,
+		segment_height: u8,
+	) -> Option<u64> {
+		let mut current = Self::local_segment_count(local_mmr_size, segment_height);
+		let total = SegmentIdentifier::count_segments_required(target_mmr_size, segment_height);
+		let theoretical_pmmr_size = SegmentIdentifier::pmmr_size(current, segment_height);
+
+		// When resuming, request the previous segment if the local PMMR is partial.
+		// Compare PMMR sizes because local and target may have the same segment count.
+		// Do not repeat the final partial segment once the target size is reached.
+		if local_mmr_size < target_mmr_size && local_mmr_size < theoretical_pmmr_size {
+			trace!(
+				"theoretical_pmmr_size {} is bigger than the current {} mmr size {}",
+				theoretical_pmmr_size,
+				segment_type,
+				local_mmr_size
+			);
+			current -= 1;
+		}
+
+		trace!(
+			"Next required {} segment is {} of {}",
+			segment_type,
+			current,
+			total
+		);
+		if current == total {
+			None
+		} else {
+			Some(current as u64)
+		}
+	}
+
 	/// Return an identifier for the next segment we need for the output pmmr
 	fn next_required_output_segment_index(&self) -> Option<u64> {
 		let local_output_mmr_size;
@@ -886,21 +900,12 @@ impl Desegmenter {
 			local_output_mmr_size = txhashset.output_mmr_size();
 		}
 
-		let total_segment_count = SegmentIdentifier::count_segments_required(
-			self.archive_header.output_mmr_size,
-			self.default_output_segment_height,
-		);
-		let next = next_required_segment_index(
+		Self::next_required_segment_index(
+			SegmentType::Output,
 			local_output_mmr_size,
 			self.archive_header.output_mmr_size,
 			self.default_output_segment_height,
-		);
-		trace!(
-			"Next required output segment is {} of {}",
-			next.unwrap_or(total_segment_count as u64),
-			total_segment_count
-		);
-		next
+		)
 	}
 
 	/// Add an output segment.
@@ -977,21 +982,12 @@ impl Desegmenter {
 			local_rangeproof_mmr_size = txhashset.rangeproof_mmr_size();
 		}
 
-		let total_segment_count = SegmentIdentifier::count_segments_required(
-			self.archive_header.output_mmr_size,
-			self.default_rangeproof_segment_height,
-		);
-		let next = next_required_segment_index(
+		Self::next_required_segment_index(
+			SegmentType::RangeProof,
 			local_rangeproof_mmr_size,
 			self.archive_header.output_mmr_size,
 			self.default_rangeproof_segment_height,
-		);
-		trace!(
-			"Next required rangeproof segment is {} of {}",
-			next.unwrap_or(total_segment_count as u64),
-			total_segment_count
-		);
-		next
+		)
 	}
 
 	/// Adds a Rangeproof segment
@@ -1074,21 +1070,12 @@ impl Desegmenter {
 			local_kernel_mmr_size = txhashset.kernel_mmr_size();
 		}
 
-		let total_segment_count = SegmentIdentifier::count_segments_required(
-			self.archive_header.kernel_mmr_size,
-			self.default_kernel_segment_height,
-		);
-		let next = next_required_segment_index(
+		Self::next_required_segment_index(
+			SegmentType::Kernel,
 			local_kernel_mmr_size,
 			self.archive_header.kernel_mmr_size,
 			self.default_kernel_segment_height,
-		);
-		trace!(
-			"Next required kernel segment is {} of {}",
-			next.unwrap_or(total_segment_count as u64),
-			total_segment_count
-		);
-		next
+		)
 	}
 
 	/// Adds a Kernel segment
@@ -1127,8 +1114,9 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn test_pibd_resume_segment() {
+	fn resume_same_segment() {
 		let segment_height = 11;
+		// Both leaf counts fall within segment 4 at this height
 		let local_size = pmmr::insertion_to_pmmr_index(9_000);
 		let target_size = pmmr::insertion_to_pmmr_index(9_720);
 
@@ -1137,12 +1125,43 @@ mod tests {
 			SegmentIdentifier::count_segments_required(target_size, segment_height)
 		);
 		assert_eq!(
-			next_required_segment_index(local_size, target_size, segment_height),
+			Desegmenter::next_required_segment_index(
+				SegmentType::Output,
+				local_size,
+				target_size,
+				segment_height
+			),
 			Some(4)
 		);
 		assert_eq!(
-			next_required_segment_index(target_size, target_size, segment_height),
+			Desegmenter::next_required_segment_index(
+				SegmentType::Output,
+				target_size,
+				target_size,
+				segment_height
+			),
 			None
+		);
+
+		let boundary = SegmentIdentifier::pmmr_size(4, segment_height);
+		assert_eq!(
+			Desegmenter::next_required_segment_index(
+				SegmentType::Output,
+				boundary,
+				target_size,
+				segment_height
+			),
+			Some(4)
+		);
+	}
+
+	#[test]
+	fn genesis_segment_count() {
+		let target_size = pmmr::insertion_to_pmmr_index(2);
+		assert_eq!(Desegmenter::local_segment_count(1, 11), 0);
+		assert_eq!(
+			Desegmenter::next_required_segment_index(SegmentType::Output, 1, target_size, 11),
+			Some(0)
 		);
 	}
 }
