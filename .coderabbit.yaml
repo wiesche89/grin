@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Fork experiment: start a review explicitly with @coderabbitai review.
+# That command publishes CodeRabbit's findings directly on the fork's PR.
+language: en-US
+tone_instructions: >-
+  Use concise, plain English. Explain the concrete trigger and impact of each
+  finding. Avoid praise, boilerplate, emojis, and speculative warnings.
+early_access: false
+enable_free_tier: true
+inheritance: false
+
+reviews:
+  profile: chill
+  high_level_summary: false
+  high_level_summary_in_walkthrough: true
+  collapse_walkthrough: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  review_status: false
+  suggested_labels: false
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  auto_approvals:
+    enabled: false
+  auto_review:
+    enabled: false
+    auto_incremental_review: false
+    description_keyword: ""
+    labels: []
+    drafts: false
+    base_branches:
+      - "^staging$"
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      mode: "off"
+    description:
+      mode: "off"
+  path_filters:
+    - "!**/target/**"
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        Focus on actionable bugs introduced by this PR: correctness, security,
+        compatibility, data loss, concurrency, and concrete performance regressions.
+        Trace callers, configuration, and tests before reporting a finding.
+        Explain a reachable failure scenario and distinguish observed evidence
+        from inference; never claim to have executed a test without doing so.
+        Check existing PR discussions and documented decisions before repeating
+        an objection. Combine duplicate findings with the same root cause.
+        Skip cosmetic style suggestions, generic requests for more tests or docs,
+        and unrelated pre-existing problems unless this change makes them worse.
+    - path: "**/*.rs"
+      instructions: >-
+        This is the Grin Rust node. Pay particular attention to consensus and
+        serialization compatibility, untrusted peer input, resource limits,
+        lock ordering, blocking work in async contexts, shutdown, and error paths.
+        For consensus-sensitive changes, check activation rules and mainnet/testnet
+        behavior before proposing a change. Do not flag every unwrap or clone;
+        establish reachability and impact. Prefer a focused regression-test
+        suggestion tied to a concrete defect over broad test-coverage requests.
+    - path: "**/*.toml"
+      instructions: >-
+        Check configuration migration, defaults, persistence, CLI overrides, and
+        dependency feature compatibility when relevant. Respect intentional
+        dependency pins and documented staging decisions.
+
+chat:
+  auto_reply: false
+  art: false
+
+knowledge_base:
+  learnings:
+    scope: local
+  issues:
+    scope: local
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: false
+    auto_planning:
+      enabled: false
+  labeling:
+    auto_apply_labels: false
