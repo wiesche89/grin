@@ -3,8 +3,9 @@
 # That command publishes CodeRabbit's findings directly on the fork's PR.
 language: en-US
 tone_instructions: >-
-  Use concise, plain English. Explain the concrete trigger and impact of each
-  finding. Avoid praise, boilerplate, emojis, and speculative warnings.
+  Write like a helpful maintainer: plain, natural English, usually 2-4 short
+  sentences per comment. State what breaks, when, and a minimal fix. Be direct
+  and friendly. No praise, boilerplate, emojis, or repeated formulaic openings.
 early_access: false
 enable_free_tier: true
 inheritance: false
@@ -57,29 +58,79 @@ reviews:
   path_instructions:
     - path: "**/*"
       instructions: >-
-        Focus on actionable bugs introduced by this PR: correctness, security,
-        compatibility, data loss, concurrency, and concrete performance regressions.
-        Trace callers, configuration, and tests before reporting a finding.
-        Explain a reachable failure scenario and distinguish observed evidence
-        from inference; never claim to have executed a test without doing so.
-        Check existing PR discussions and documented decisions before repeating
-        an objection. Combine duplicate findings with the same root cause.
-        Skip cosmetic style suggestions, generic requests for more tests or docs,
-        and unrelated pre-existing problems unless this change makes them worse.
+        Review only problems introduced or made reachable by this PR. Use the
+        current PR head and actual base/merge-base (normally staging); compare
+        old and new behavior in context. Inspect every changed hunk, including
+        small helpers, tests, docs, lockfiles, and apparently mechanical changes.
+        Scale depth to risk and revisit changes with no findings before finishing.
+        Trace callers, consumers, data sources, validation, and error handling.
+        Follow authoritative state, copies, writers, readers, synchronization,
+        persistence, and cleanup through failure, timeout, restart, and recovery.
+        Check missing, empty, maximum, stale, and legacy inputs where relevant.
+        Compare new abstractions with existing helpers and direct dependencies,
+        established ownership, layers, error conventions, and relevant history.
+        Raise maintainability findings only for concrete avoidable duplication,
+        diverging sources of truth, or misplaced responsibilities; not taste.
+        Check CLI/TUI/API/config parity and whether docs and help match real code.
+        Confirm tests reach the production path rather than only test helpers.
+        Before reporting, actively try to disprove the finding using type
+        invariants, caller guards, locks, existing tests, and intended behavior.
+        Read existing PR threads, including resolved and outdated discussions,
+        and documented decisions. Recheck against the current head; do not repeat
+        fixed issues or create duplicate findings for the same root cause.
+        Anchor each finding to the relevant changed lines, identify a realistic
+        trigger and impact, and suggest the smallest justified fix. Base severity
+        on the actual impact. Keep minor actionable cleanup clearly non-blocking.
+        Usually use 2-4 short sentences: the failure condition, its consequence,
+        and a minimal correction. Add only the code or evidence needed to explain
+        it. Avoid stock phrases such as "Could we" in every comment, long reports,
+        audit tables, evidence IDs, and restating the diff in each comment.
+        Distinguish static reasoning from reproduced behavior. Never claim tests,
+        benchmarks, full coverage, or compatibility you have not verified. When
+        tools permit, validate substantial findings with focused regression or
+        differential tests; use fault, concurrency, property, or fuzz tests only
+        when justified by the changed path. State material verification limits
+        briefly. Never expose secrets or leave temporary test edits in the PR.
+        Skip unrelated pre-existing issues, cosmetic style complaints, generic
+        requests for more tests/docs, and speculation without a concrete code path.
+        Do not infer or label code as AI-generated.
     - path: "**/*.rs"
       instructions: >-
-        This is the Grin Rust node. Pay particular attention to consensus and
-        serialization compatibility, untrusted peer input, resource limits,
-        lock ordering, blocking work in async contexts, shutdown, and error paths.
-        For consensus-sensitive changes, check activation rules and mainnet/testnet
-        behavior before proposing a change. Do not flag every unwrap or clone;
-        establish reachability and impact. Prefer a focused regression-test
-        suggestion tied to a concrete defect over broad test-coverage requests.
+        This is the Grin Rust node. Apply the following checks only to paths
+        affected by the PR; do not manufacture consensus or wallet findings.
+        For consensus, inspect block/header/output/kernel validation, PMMR and
+        commitment invariants, activation heights, serialization versions,
+        determinism, and mainnet/testnet differences.
+        For header/block sync, PIBD and PIHD, check progress, segment ownership,
+        inflight requests, retries, mode switches, malformed/stale/duplicate data,
+        and restart with partial state. For P2P, validate before expensive work,
+        bound sizes and allocation, and avoid banning valid peers.
+        For chain and LMDB state, check atomic batches, reorg/rollback of dependent
+        indexes and caches, crash boundaries, migration, and recovery.
+        Check lock order and lifetime, blocking work in async contexts, lost
+        notifications, cancellation, and cleanup of tasks, threads, and processes.
+        For Tor/Arti paths, compare integrated and external backends, service
+        startup, proxy/bridge settings, timeouts, retry ownership, and shutdown.
+        Follow sensitive values through copies, formatting, logs, files, and drop;
+        distinguish dropping ordinary buffers from zeroization.
+        If shared Node/Wallet APIs or core types change, inspect the corresponding
+        official grin-wallet branch: staging with staging, master with master.
+        Check actual pinned revisions/features, requests/responses, auth, errors,
+        optional fields, transaction handling, and coordinated upgrade ordering.
+        Fork-pin tests alone do not establish official Node/Wallet compatibility;
+        state when the counterpart repository or runtime tests were unavailable.
+        Consider unsafe/FFI boundaries, public API changes, supported platforms,
+        and MSRV when touched. Do not flag every unwrap, clone, or new helper:
+        establish a reachable failure or concrete maintenance cost first.
     - path: "**/*.toml"
       instructions: >-
         Check configuration migration, defaults, persistence, CLI overrides, and
-        dependency feature compatibility when relevant. Respect intentional
-        dependency pins and documented staging decisions.
+        path resolution. Compare documented keys with the actual serde fields,
+        aliases, defaults, and consumers; check write/load round trips preserve
+        user settings. For Cargo changes, inspect versions, pins, features, MSRV,
+        platform support, and the actual Node/Wallet dependency revision. Respect
+        intentional dependency pins and documented staging decisions. Require
+        migration only when older configurations are realistically affected.
 
 chat:
   auto_reply: false
