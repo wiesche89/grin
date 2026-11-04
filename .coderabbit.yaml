@@ -1,6 +1,5 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
-# Fork experiment: start a review explicitly with @coderabbitai review.
-# That command publishes CodeRabbit's findings directly on the fork's PR.
+# Fork experiment: automatic reviews publish findings on the fork's PRs.
 language: en-US
 tone_instructions: >-
   Write like a helpful maintainer: plain, natural English, usually 2-4 short
@@ -13,12 +12,20 @@ inheritance: false
 reviews:
   profile: chill
   high_level_summary: false
-  high_level_summary_in_walkthrough: true
+  high_level_summary_in_walkthrough: false
   collapse_walkthrough: true
   poem: false
   in_progress_fortune: false
   sequence_diagrams: false
   review_status: false
+  enable_prompt_for_ai_agents: false
+  review_info: false
+  review_details: true
+  changed_files_summary: false
+  estimate_code_review_effort: false
+  assess_linked_issues: false
+  related_issues: false
+  related_prs: false
   suggested_labels: false
   auto_apply_labels: false
   suggested_reviewers: false
@@ -47,6 +54,8 @@ reviews:
     resolve_merge_conflict:
       enabled: false
   pre_merge_checks:
+    issue_assessment:
+      mode: "off"
     docstrings:
       mode: "off"
     title:
