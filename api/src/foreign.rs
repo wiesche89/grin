@@ -84,7 +84,7 @@ where
 	/// # Returns
 	/// * Result Containing:
 	/// * A [`BlockHeaderPrintable`](types/struct.BlockHeaderPrintable.html)
-	/// * or [`Error`](crate::rest::ApiServer) if an error is encountered.
+	/// * or [`Error`](crate::rest::Error) if an error is encountered.
 	pub fn get_header(
 		&self,
 		height: Option<u64>,
@@ -209,7 +209,7 @@ where
 		let kernel_handler = KernelHandler {
 			chain: self.chain.clone(),
 		};
-		kernel_handler.get_kernel_v2(excess, min_height, max_height)
+		kernel_handler.get_kernel_v2(excess, max_height, min_height)
 	}
 
 	/// Retrieves details about specifics outputs. Supports retrieval of multiple outputs in a single request.
@@ -304,7 +304,7 @@ where
 		let pool_handler = PoolHandler {
 			tx_pool: self.tx_pool.clone(),
 		};
-		pool_handler.get_stempool_size()
+		pool_handler.get_pool_size()
 	}
 
 	/// Returns the number of transaction in the stem transaction pool.
@@ -317,7 +317,7 @@ where
 		let pool_handler = PoolHandler {
 			tx_pool: self.tx_pool.clone(),
 		};
-		pool_handler.get_pool_size()
+		pool_handler.get_stempool_size()
 	}
 
 	/// Returns the unconfirmed transactions in the transaction pool.
