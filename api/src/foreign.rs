@@ -84,7 +84,7 @@ where
 	/// # Returns
 	/// * Result Containing:
 	/// * A [`BlockHeaderPrintable`](types/struct.BlockHeaderPrintable.html)
-	/// * or [`Error`](struct.Error.html) if an error is encountered.
+	/// * or [`Error`] if an error is encountered.
 	pub fn get_header(
 		&self,
 		height: Option<u64>,
