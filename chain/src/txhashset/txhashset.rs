@@ -722,6 +722,7 @@ impl TxHashSet {
 		let total_outputs = outputs_pos.len();
 		let max_height = batch.head()?.height;
 		let mut header_reads = 0;
+		let mut added_count = 0;
 
 		// Includes the final header check after the binary search
 		let max_reads_per_search = u64::BITS - max_height.leading_zeros() + 1;
@@ -740,6 +741,7 @@ impl TxHashSet {
 						break;
 					}
 					batch.save_output_pos_height(&commit, CommitPos { pos, height })?;
+					added_count += 1;
 					outputs.next();
 				}
 			}
@@ -757,12 +759,13 @@ impl TxHashSet {
 				};
 
 				batch.save_output_pos_height(&commit, CommitPos { pos: pos1, height })?;
+				added_count += 1;
 				min_height = height;
 			}
 		}
 		info!(
 			"init_output_pos_index: added entries for {} utxos using {} header reads, took {}s",
-			total_outputs,
+			added_count,
 			header_reads,
 			now.elapsed().as_secs(),
 		);
